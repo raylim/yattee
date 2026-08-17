@@ -146,6 +146,7 @@ final class SubscriptionService {
                 "Failed to subscribe to \(channel.name): \(error.localizedDescription)",
                 category: .general
             )
+            isLoading = false
             throw error
         }
 
@@ -192,6 +193,7 @@ final class SubscriptionService {
                 "Failed to unsubscribe from \(channelID): \(error.localizedDescription)",
                 category: .general
             )
+            isLoading = false
             throw error
         }
 

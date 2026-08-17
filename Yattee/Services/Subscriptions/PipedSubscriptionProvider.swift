@@ -30,6 +30,7 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
 
     /// Whether the cache has been populated from the server.
     private var cachePopulated = false
+    private var cachedAccount: SubscriptionAccount?
 
     // MARK: - Initialization
 
@@ -48,6 +49,7 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
     // MARK: - SubscriptionProvider
 
     func fetchSubscriptions() async throws -> [Channel] {
+        invalidateCacheIfAccountChanged()
         let (instance, authToken) = try await getAuthenticatedInstance()
 
         // Fetch subscriptions from Piped
@@ -57,6 +59,7 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
         cachedChannelIDs = Set(subscriptions.map(\.channelId))
         cachedChannels = subscriptions.map { $0.toChannel() }
         cachePopulated = true
+        cachedAccount = settingsManager.subscriptionAccount
 
         LoggingService.shared.info("Fetched \(subscriptions.count) Piped subscriptions", category: .api)
 
@@ -64,6 +67,7 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
     }
 
     func subscribe(to channel: Channel) async throws {
+        invalidateCacheIfAccountChanged()
         let (instance, authToken) = try await getAuthenticatedInstance()
 
         // Subscribe on Piped server
@@ -71,6 +75,7 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
 
         // Update in-memory cache only
         cachedChannelIDs.insert(channel.id.channelID)
+        cachedAccount = settingsManager.subscriptionAccount
         if !cachedChannels.contains(where: { $0.id.channelID == channel.id.channelID }) {
             cachedChannels.append(channel)
         }
@@ -79,6 +84,7 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
     }
 
     func unsubscribe(from channelID: String) async throws {
+        invalidateCacheIfAccountChanged()
         let (instance, authToken) = try await getAuthenticatedInstance()
 
         // Unsubscribe on Piped server
@@ -86,12 +92,14 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
 
         // Update in-memory cache only
         cachedChannelIDs.remove(channelID)
+        cachedAccount = settingsManager.subscriptionAccount
         cachedChannels.removeAll { $0.id.channelID == channelID }
 
         LoggingService.shared.info("Unsubscribed from \(channelID) on Piped", category: .api)
     }
 
     func isSubscribed(to channelID: String) async -> Bool {
+        invalidateCacheIfAccountChanged()
         // If cache isn't populated yet, try to refresh it
         if !cachePopulated {
             do {
@@ -110,10 +118,20 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
     }
 
     var cachedSubscriptionCount: Int? {
-        cachePopulated ? cachedChannels.count : nil
+        invalidateCacheIfAccountChanged()
+        return cachePopulated ? cachedChannels.count : nil
     }
 
     // MARK: - Private Helpers
+
+    private func invalidateCacheIfAccountChanged() {
+        let account = settingsManager.subscriptionAccount
+        guard account.type == accountType, cachedAccount != account else { return }
+        cachedChannelIDs.removeAll()
+        cachedChannels.removeAll()
+        cachePopulated = false
+        cachedAccount = account
+    }
 
     /// Gets the authenticated Piped instance and auth token from account settings.
     private func getAuthenticatedInstance() async throws -> (Instance, String) {

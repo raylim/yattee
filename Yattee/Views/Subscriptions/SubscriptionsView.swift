@@ -1276,38 +1276,52 @@ struct SubscriptionsView: View {
 
     /// Empty state shown when Yattee Server is required but not configured.
     private var yatteeServerRequiredView: some View {
-        ContentUnavailableView {
-            Label(String(localized: "subscriptions.yatteeServerRequired.title"), systemImage: "server.rack")
-        } description: {
-            Text(String(localized: "subscriptions.yatteeServerRequired.description"))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.vertical, 40)
+        feedErrorView(
+            title: String(localized: "subscriptions.yatteeServerRequired.title"),
+            description: String(localized: "subscriptions.yatteeServerRequired.description"),
+            systemImage: "server.rack"
+        )
     }
 
     /// Empty state shown when Invidious account is not authenticated.
     private var notAuthenticatedView: some View {
-        ContentUnavailableView {
-            Label(String(localized: "subscriptions.notAuthenticated.title"), systemImage: "person.crop.circle.badge.exclamationmark")
-        } description: {
-            Text(String(localized: "subscriptions.notAuthenticated.description"))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.vertical, 40)
+        feedErrorView(
+            title: String(localized: "subscriptions.notAuthenticated.title"),
+            description: String(localized: "subscriptions.notAuthenticated.description"),
+            systemImage: "person.crop.circle.badge.exclamationmark"
+        )
     }
 
     private func gridErrorView(_ error: String) -> some View {
-        ContentUnavailableView {
-            Label(String(localized: "common.error"), systemImage: "exclamationmark.triangle")
-        } description: {
-            Text(error)
-        } actions: {
+        feedErrorView(
+            title: String(localized: "common.error"),
+            description: error,
+            systemImage: "exclamationmark.triangle"
+        )
+    }
+
+    private func feedErrorView(title: String, description: String, systemImage: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 34))
+                .foregroundStyle(.orange)
+
+            Text(title)
+                .font(.headline)
+
+            Text(description)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+
             Button(String(localized: "common.retry")) {
                 Task { await loadFeed(forceRefresh: true) }
             }
+            .buttonStyle(.borderedProminent)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.vertical, 40)
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .padding(24)
     }
 
     // MARK: - Data Loading
