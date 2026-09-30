@@ -123,6 +123,20 @@ struct URLRouterTests {
         #expect(URLRouter.parseTimestampValue("90.5") == 90.5)
     }
 
+    @Test("Reject non-finite and negative plain timestamp values")
+    func rejectInvalidPlainTimestampValues() {
+        // Plain numeric values that are accepted by TimeInterval(_:) but are not
+        // valid seek targets must return nil rather than poisoning the player.
+        #expect(URLRouter.parseTimestampValue("inf") == nil)
+        #expect(URLRouter.parseTimestampValue("infinity") == nil)
+        #expect(URLRouter.parseTimestampValue("nan") == nil)
+        #expect(URLRouter.parseTimestampValue("-5") == nil)
+        // Valid plain seconds still parse.
+        #expect(URLRouter.parseTimestampValue("0") == 0)
+        #expect(URLRouter.parseTimestampValue("90") == 90)
+        #expect(URLRouter.parseTimestampValue("90.5") == 90.5)
+    }
+
     // MARK: - Share Extension Wrapper Tests
 
     @Test("Unwrap yattee://open wrapper to inner URL with timestamp")
@@ -270,6 +284,26 @@ struct URLRouterTests {
             #expect(url == dailymotionURL)
         } else {
             Issue.record("Expected externalVideo destination for Dailymotion")
+        }
+    }
+
+    // MARK: - External Host Exclusion Tests
+
+    @Test("www.duckduckgo.com is excluded from external video routing")
+    func wwwDuckDuckGoExcluded() {
+        let url = URL(string: "https://www.duckduckgo.com/?q=cat+videos")!
+        let destination = router.route(url)
+        if case .externalVideo = destination {
+            Issue.record("www.duckduckgo.com must not route to externalVideo; yt-dlp extraction should not run for a search engine")
+        }
+    }
+
+    @Test("duckduckgo.com bare host remains excluded from external video")
+    func duckDuckGoBareExcluded() {
+        let url = URL(string: "https://duckduckgo.com/?q=test")!
+        let destination = router.route(url)
+        if case .externalVideo = destination {
+            Issue.record("duckduckgo.com must not route to externalVideo; yt-dlp extraction should not run for a search engine")
         }
     }
 
