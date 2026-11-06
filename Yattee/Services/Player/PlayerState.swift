@@ -49,12 +49,6 @@ struct RetryState: Equatable, Sendable {
     let exhausted: Bool
 
     static let idle = RetryState(currentRetry: 0, maxRetries: 5, isRetrying: false, exhausted: false)
-
-    /// Text to display during retries (e.g., "Retrying... (1/5)").
-    var displayText: String? {
-        guard isRetrying, currentRetry > 0 else { return nil }
-        return String(localized: "player.retry.status \(currentRetry) \(maxRetries)")
-    }
 }
 
 /// Represents a queued video for playback.
@@ -225,14 +219,70 @@ final class PlayerState {
 
     // MARK: - Time & Progress
 
-    /// Current playback time in seconds.
-    var currentTime: TimeInterval = 0
+    /// Current playback time in seconds. Always current when read; observing
+    /// views are only notified while `publishesTimeUpdates` is true.
+    var currentTime: TimeInterval {
+        get {
+            access(keyPath: \.currentTime)
+            return storedCurrentTime
+        }
+        set {
+            if publishesTimeUpdates {
+                PerfCounter.count("player.time.published")
+                withMutation(keyPath: \.currentTime) { storedCurrentTime = newValue }
+            } else {
+                PerfCounter.count("player.time.suppressed")
+                storedCurrentTime = newValue
+            }
+            updateActiveChapter()
+        }
+    }
+
+    @ObservationIgnored private var storedCurrentTime: TimeInterval = 0
+
+    /// `currentTime` without observing it, for views that are hidden: they
+    /// show the latest value whenever they render for another reason but are
+    /// not re-rendered on every time update.
+    var untrackedCurrentTime: TimeInterval { storedCurrentTime }
+
+    /// When false, `currentTime` and `bufferedTime` keep updating without
+    /// invalidating views that read them. Turned off while the app is in the
+    /// background: every mpv time-pos tick otherwise re-renders the hidden
+    /// player UI (progress bar, time labels, chapter segments) several times
+    /// per second, which drains the battery during long background or
+    /// audio-only playback.
+    @ObservationIgnored var publishesTimeUpdates = true {
+        didSet {
+            // Resuming: publish the times accumulated while suppressed.
+            guard publishesTimeUpdates, !oldValue else { return }
+            withMutation(keyPath: \.currentTime) {}
+            withMutation(keyPath: \.bufferedTime) {}
+        }
+    }
 
     /// Total duration in seconds.
     var duration: TimeInterval = 0
 
-    /// Buffered time in seconds.
-    var bufferedTime: TimeInterval = 0
+    /// Buffered time in seconds. Follows `currentTime`, so it is published
+    /// under the same `publishesTimeUpdates` gate.
+    var bufferedTime: TimeInterval {
+        get {
+            access(keyPath: \.bufferedTime)
+            return storedBufferedTime
+        }
+        set {
+            if publishesTimeUpdates {
+                withMutation(keyPath: \.bufferedTime) { storedBufferedTime = newValue }
+            } else {
+                storedBufferedTime = newValue
+            }
+        }
+    }
+
+    @ObservationIgnored private var storedBufferedTime: TimeInterval = 0
+
+    /// `bufferedTime` without observing it (see `untrackedCurrentTime`).
+    var untrackedBufferedTime: TimeInterval { storedBufferedTime }
 
     /// Whether duration updates from the player backend should be ignored.
     /// Set to true when playing through fast endpoint where duration is known from API
@@ -356,11 +406,27 @@ final class PlayerState {
     // MARK: - Chapters
 
     /// Video chapters if available.
-    var chapters: [VideoChapter] = []
+    var chapters: [VideoChapter] = [] {
+        didSet { updateActiveChapter() }
+    }
+
+    /// ID of the chapter containing the current playback time. Stored and
+    /// change-guarded so views highlighting the active chapter observe only
+    /// chapter transitions, not every time-pos tick — reading `currentTime`
+    /// from a panel body re-renders it many times per second during playback.
+    private(set) var activeChapterID: UUID?
 
     /// Current chapter based on playback time.
     var currentChapter: VideoChapter? {
-        chapters.last { $0.startTime <= currentTime }
+        guard let activeChapterID else { return nil }
+        return chapters.first { $0.id == activeChapterID }
+    }
+
+    private func updateActiveChapter() {
+        let id = chapters.last { $0.startTime <= currentTime }?.id
+        if activeChapterID != id {
+            activeChapterID = id
+        }
     }
 
     // MARK: - Storyboards
@@ -424,12 +490,6 @@ final class PlayerState {
     /// nil when not buffering or when using AVPlayer backend.
     var bufferProgress: Int?
 
-    /// Whether the video is vertical (portrait orientation).
-    var isVerticalVideo: Bool {
-        guard let ratio = videoAspectRatio else { return false }
-        return ratio < 1.0
-    }
-
     /// Display aspect ratio for UI - falls back to 16:9 if unknown.
     var displayAspectRatio: Double {
         videoAspectRatio ?? (16.0 / 9.0)
@@ -465,6 +525,9 @@ final class PlayerState {
             commentsContinuation = nil
             // Reset storyboards to prevent previous video's storyboards from appearing
             storyboards = []
+            // Reset chapters so the panel doesn't show the previous video's
+            // chapters while the new one loads
+            chapters = []
         }
         currentVideo = video
         currentStream = stream
@@ -538,6 +601,75 @@ final class PlayerState {
         comments = []
         commentsState = .idle
         commentsContinuation = nil
+    }
+
+    // MARK: - Comments Loading
+
+    /// Loads the first page of comments for the current video.
+    /// Single loader shared by the player sheet preload and the comments overlay retry.
+    func loadComments(contentService: ContentService, instancesManager: InstancesManager) async {
+        guard let video = currentVideo else { return }
+
+        // Don't load comments for non-YouTube videos
+        guard video.supportsComments else {
+            commentsState = .disabled
+            return
+        }
+
+        guard let instance = instancesManager.instance(for: video) else { return }
+
+        // Capture video ID at start for validation after async call
+        let requestedVideoID = video.id
+        commentsState = .loading
+
+        do {
+            let page = try await contentService.comments(
+                videoID: video.id.videoID,
+                instance: instance,
+                continuation: nil
+            )
+
+            // Validate video hasn't changed and task wasn't cancelled
+            guard !Task.isCancelled, currentVideo?.id == requestedVideoID else { return }
+
+            comments = page.comments
+            commentsContinuation = page.continuation
+            commentsState = .loaded
+        } catch let error as APIError where error == .commentsDisabled {
+            guard !Task.isCancelled, currentVideo?.id == requestedVideoID else { return }
+            commentsState = .disabled
+        } catch {
+            guard !Task.isCancelled, currentVideo?.id == requestedVideoID else { return }
+            commentsState = .error
+        }
+    }
+
+    /// Loads the next page of comments using the stored continuation token.
+    func loadMoreComments(contentService: ContentService, instancesManager: InstancesManager) async {
+        guard let continuation = commentsContinuation else { return }
+        guard let video = currentVideo, video.supportsComments else { return }
+        guard let instance = instancesManager.instance(for: video) else { return }
+
+        let requestedVideoID = video.id
+        commentsState = .loadingMore
+
+        do {
+            let page = try await contentService.comments(
+                videoID: video.id.videoID,
+                instance: instance,
+                continuation: continuation
+            )
+
+            guard !Task.isCancelled, currentVideo?.id == requestedVideoID else { return }
+
+            comments.append(contentsOf: page.comments)
+            commentsContinuation = page.continuation
+            commentsState = .loaded
+        } catch {
+            guard !Task.isCancelled, currentVideo?.id == requestedVideoID else { return }
+            // Don't change state to error on load more failure
+            commentsState = .loaded
+        }
     }
 
     /// Adds a video to the end of the queue.

@@ -57,14 +57,10 @@ struct MacOSControlBar: View {
         isDragging ? dragProgress : playerState.progress
     }
 
-    private var bufferedProgress: Double {
-        guard playerState.duration > 0 else { return 0 }
-        return playerState.bufferedTime / playerState.duration
-    }
-
     // MARK: - Body
 
     var body: some View {
+        let _ = PerfCounter.body("MacOSControlBar")
         VStack(spacing: 8) {
             // Top row: preset-driven button row
             MacOSControlsSectionRenderer(
@@ -251,8 +247,7 @@ struct MacOSControlBar: View {
             storyboard: storyboard,
             seekTime: seekTime,
             storyboardService: StoryboardService.shared,
-            buttonBackground: .none,
-            theme: .dark
+            buttonBackground: .none
         )
         .transition(.opacity.combined(with: .scale(scale: 0.9)))
         .animation(.easeInOut(duration: 0.15), value: isDragging || isHoveringProgress)

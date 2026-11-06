@@ -34,6 +34,9 @@ final class SettingsManager {
     var _useSeparateDarkAccentColor: Bool?
     var _showWatchedCheckmark: Bool?
 
+    // Accounts
+    var _showAccountPickers: Bool?
+
     // Playback
     var _preferredQuality: VideoQuality?
     var _cellularQuality: VideoQuality?
@@ -75,6 +78,7 @@ final class SettingsManager {
     var _inAppOrientationLock: Bool?
     var _rotateToMatchAspectRatio: Bool?
     var _preferPortraitBrowsing: Bool?
+    var _tabletopReflection: Bool?
     #endif
     #if os(macOS)
     var _macPlayerSeparateWindow: Bool?
@@ -142,6 +146,9 @@ final class SettingsManager {
 
     // Tab bar startup
     var _tabBarStartupTab: SidebarMainItem?
+    #if os(iOS)
+    var _navigationStyle: NavigationStyle?
+    #endif
     var _sidebarSourcesEnabled: Bool?
     var _sidebarSourceSort: SidebarSourceSort?
     var _sidebarSourcesLimitEnabled: Bool?
@@ -175,10 +182,12 @@ final class SettingsManager {
     var _tvVideoSyncMode: TVVideoSyncMode?
 
     // Details panel settings
-    var _floatingDetailsPanelSide: FloatingPanelSide?
     var _floatingDetailsPanelWidth: CGFloat?
     var _landscapeDetailsPanelVisible: Bool?
     var _landscapeDetailsPanelPinned: Bool?
+    var _portraitDetailsPanelLastVisible: Bool?
+    var _landscapeDetailsPanelLastVisible: Bool?
+    var _cornerPanelColumnWidth: CGFloat?
 
     // Notification settings
     var _backgroundNotificationsEnabled: Bool?
@@ -192,9 +201,6 @@ final class SettingsManager {
     var _saveRecentChannels: Bool?
     var _saveRecentPlaylists: Bool?
 
-    // Subscription account settings
-    var _subscriptionAccount: SubscriptionAccount?
-
     // Queue settings
     var _queueEnabled: Bool?
     var _queueAutoPlayNext: Bool?
@@ -203,17 +209,23 @@ final class SettingsManager {
     // Handoff settings
     var _handoffEnabled: Bool?
 
+    // Sharing settings
+    var _privacyFrontendSharingEnabled: Bool?
+
     // Remote Control settings
     var _remoteControlCustomDeviceName: String?
     var _remoteControlHideWhenBackgrounded: Bool?
 
     // Link action settings
     var _defaultLinkAction: DefaultLinkAction?
+    var _linkActionsRunWithoutConfirmation: Bool?
 
     // Video tap actions (iOS/macOS only)
     #if !os(tvOS)
     var _thumbnailTapAction: VideoTapAction?
     var _textAreaTapAction: VideoTapAction?
+    var _videoInfoActionsLayout: VideoInfoActionsLayout?
+    var _videoInfoPrimaryAction: VideoInfoPrimaryAction?
     #endif
 
     // Video tap action (tvOS only)
@@ -427,6 +439,7 @@ final class SettingsManager {
         _customAccentColorDark = nil
         _useSeparateDarkAccentColor = nil
         _showWatchedCheckmark = nil
+        _showAccountPickers = nil
         _preferredQuality = nil
         _cellularQuality = nil
         _backgroundPlaybackEnabled = nil
@@ -457,6 +470,7 @@ final class SettingsManager {
         _inAppOrientationLock = nil
         _rotateToMatchAspectRatio = nil
         _preferPortraitBrowsing = nil
+        _tabletopReflection = nil
         #endif
         _iCloudSyncEnabled = nil
         _lastSyncTime = nil
@@ -498,6 +512,9 @@ final class SettingsManager {
         _sidebarMainItemVisibility = nil
         _sidebarStartupTab = nil
         _tabBarStartupTab = nil
+        #if os(iOS)
+        _navigationStyle = nil
+        #endif
         _sidebarSourcesEnabled = nil
         _sidebarSourceSort = nil
         _sidebarSourcesLimitEnabled = nil
@@ -522,10 +539,12 @@ final class SettingsManager {
         _tvMatchDisplayDynamicRange = nil
         _tvAudioDelayMs = nil
         _tvVideoSyncMode = nil
-        _floatingDetailsPanelSide = nil
         _floatingDetailsPanelWidth = nil
         _landscapeDetailsPanelVisible = nil
         _landscapeDetailsPanelPinned = nil
+        _portraitDetailsPanelLastVisible = nil
+        _landscapeDetailsPanelLastVisible = nil
+        _cornerPanelColumnWidth = nil
         _backgroundNotificationsEnabled = nil
         _defaultNotificationsForNewChannels = nil
         _lastBackgroundCheck = nil
@@ -536,17 +555,20 @@ final class SettingsManager {
         _saveRecentSearches = nil
         _saveRecentChannels = nil
         _saveRecentPlaylists = nil
-        _subscriptionAccount = nil
         _queueEnabled = nil
         _queueAutoPlayNext = nil
         _queueAutoPlayCountdown = nil
         _handoffEnabled = nil
+        _privacyFrontendSharingEnabled = nil
         _defaultLinkAction = nil
+        _linkActionsRunWithoutConfirmation = nil
         _remoteControlCustomDeviceName = nil
         _remoteControlHideWhenBackgrounded = nil
         #if !os(tvOS)
         _thumbnailTapAction = nil
         _textAreaTapAction = nil
+        _videoInfoActionsLayout = nil
+        _videoInfoPrimaryAction = nil
         #endif
         #if os(tvOS)
         _tvOSVideoTapAction = nil

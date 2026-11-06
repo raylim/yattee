@@ -206,12 +206,6 @@ actor YatteeServerAPI: InstanceAPI {
         }
     }
 
-    func streams(videoID: String, instance: Instance) async throws -> [Stream] {
-        let endpoint = GenericEndpoint.get("/api/v1/videos/\(videoID)")
-        let response: YatteeVideoDetails = try await httpClient.fetch(endpoint, baseURL: instance.url)
-        return response.toStreams()
-    }
-
     func captions(videoID: String, instance: Instance) async throws -> [Caption] {
         let endpoint = GenericEndpoint.get("/api/v1/videos/\(videoID)")
         let response: YatteeVideoDetails = try await httpClient.fetch(endpoint, baseURL: instance.url)
@@ -237,12 +231,6 @@ actor YatteeServerAPI: InstanceAPI {
         return ChannelSearchPage(items: items, nextPage: hasResults ? page + 1 : nil)
     }
 
-    /// Fetches video details, streams, and captions in a single API call.
-    func videoWithStreamsAndCaptions(id: String, instance: Instance) async throws -> (video: Video, streams: [Stream], captions: [Caption]) {
-        let result = try await videoWithStreamsAndCaptionsAndStoryboards(id: id, instance: instance)
-        return (video: result.video, streams: result.streams, captions: result.captions)
-    }
-
     func videoWithStreamsAndCaptionsAndStoryboards(id: String, instance: Instance) async throws -> (video: Video, streams: [Stream], captions: [Caption], storyboards: [Storyboard]) {
         let endpoint = GenericEndpoint.get("/api/v1/videos/\(id)")
         let response: YatteeVideoDetails = try await httpClient.fetch(endpoint, baseURL: instance.url)
@@ -266,16 +254,6 @@ actor YatteeServerAPI: InstanceAPI {
     enum ProxyMode: String {
         case relay
         case download
-    }
-
-    /// Fetches streams with URLs that proxy through the Yattee Server.
-    func proxyStreams(videoID: String, instance: Instance, mode: ProxyMode) async throws -> [Stream] {
-        let endpoint = GenericEndpoint.get(
-            "/api/v1/videos/\(videoID)",
-            query: ["proxy": "true", "proxy_mode": mode.rawValue]
-        )
-        let response: YatteeVideoDetails = try await httpClient.fetch(endpoint, baseURL: instance.url)
-        return response.toStreams()
     }
 
     /// Fetches video details, proxy streams, captions, and storyboards in a single API call.
@@ -414,6 +392,7 @@ struct ServerFeedVideo: Decodable, Sendable {
     let videoUrl: String?
     let isUpcoming: Bool?
     let premiereTimestamp: Int64?
+    let isShort: Bool?
 
     func toVideo() -> Video? {
         // Determine content source based on extractor
@@ -440,7 +419,8 @@ struct ServerFeedVideo: Decodable, Sendable {
             thumbnails: videoThumbnails?.map { $0.toThumbnail() } ?? [],
             isLive: false,
             isUpcoming: isUpcoming ?? false,
-            scheduledStartTime: premiereTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            scheduledStartTime: premiereTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            isShort: isShort
         )
     }
 }
@@ -633,6 +613,7 @@ private struct YatteeVideo: Decodable, Sendable {
     let liveNow: Bool?
     let isUpcoming: Bool?
     let premiereTimestamp: Int64?
+    let isShort: Bool?
 
     nonisolated func toVideo() -> Video {
         Video(
@@ -648,7 +629,8 @@ private struct YatteeVideo: Decodable, Sendable {
             thumbnails: videoThumbnails?.map { $0.toThumbnail() } ?? [],
             isLive: liveNow ?? false,
             isUpcoming: isUpcoming ?? false,
-            scheduledStartTime: premiereTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            scheduledStartTime: premiereTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            isShort: isShort
         )
     }
 }
@@ -829,7 +811,9 @@ private struct YatteeRecommendedVideo: Decodable, Sendable {
             id: .global(videoId),
             title: title,
             description: nil,
-            author: Author(id: authorId, name: author),
+            // An empty authorId (unlinked recommendation author) can't open a
+            // channel, so it hides Go to Channel instead of failing to load.
+            author: Author(id: authorId, name: author, hasRealChannelInfo: !authorId.isEmpty),
             duration: TimeInterval(lengthSeconds),
             publishedAt: nil,
             publishedText: nil,
@@ -1322,10 +1306,6 @@ private struct YatteeChannel: Decodable, Sendable {
             isVerified: authorVerified ?? false
         )
     }
-}
-
-private struct YatteeChannelVideos: Decodable, Sendable {
-    let videos: [YatteeVideo]
 }
 
 private struct YatteeChannelSearchResponse: Decodable, Sendable {

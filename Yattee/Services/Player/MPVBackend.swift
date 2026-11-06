@@ -48,7 +48,7 @@ final class MPVBackend: PlayerBackend {
         get { _volume }
         set {
             _volume = newValue
-            mpvClient?.setProperty("volume", Double(newValue * 100))
+            mpvClient?.setVolume(Double(newValue * 100), muted: _isMuted)
         }
     }
 
@@ -56,21 +56,8 @@ final class MPVBackend: PlayerBackend {
         get { _isMuted }
         set {
             _isMuted = newValue
-            mpvClient?.setProperty("mute", newValue)
+            mpvClient?.setVolume(Double(_volume * 100), muted: newValue)
         }
-    }
-
-    /// Panscan value (0.0 = aspect fit with black bars, 1.0 = aspect fill/crop)
-    var panscan: Double {
-        get { _panscan }
-        set {
-            _panscan = max(0, min(1, newValue))
-            mpvClient?.setProperty("panscan", _panscan)
-        }
-    }
-
-    var supportedFormats: Set<StreamFormat> {
-        Set(StreamFormat.allCases) // MPV supports all formats
     }
 
     // MARK: - Public Properties
@@ -81,6 +68,9 @@ final class MPVBackend: PlayerBackend {
     // MARK: - Private Properties
 
     private var mpvClient: MPVClient?
+    #if os(iOS)
+    private var videoFillsFrame = false
+    #endif
     #if os(macOS)
     private var renderView: MPVOGLView?
     #elseif targetEnvironment(simulator) && (os(iOS) || os(tvOS))
@@ -92,15 +82,9 @@ final class MPVBackend: PlayerBackend {
     private var _rate: Float = 1.0
     private var _volume: Float = 1.0
     private var _isMuted: Bool = false
-    private var _panscan: Double = 0.0
 
     private var currentStream: Stream?
-    private var currentAudioStream: Stream?
     private var currentCaption: Caption?
-    private var pendingAutoplay: Bool = false
-
-    /// Tracks reported by mpv for the loaded file (embedded and external).
-    private(set) var currentTracks: [MPVTrack] = []
 
     // Retry mechanism: 4 attempts with increasing timeouts and delays
     // Attempt 1: 3s timeout, 1s delay | Attempt 2: 3s timeout, 3s delay
@@ -142,6 +126,15 @@ final class MPVBackend: PlayerBackend {
     private var videoCodec: String = ""
     private var hwdecCurrent: String = ""
     private var hwdecInterop: String = ""
+    // Software-fallback detection (logged + toasted only with "Enable Logging" on).
+    // mpv falls back to software one-way and does not always emit a property
+    // event for it, so the stats loop also polls hwdec-current.
+    private var hwdecTrackingArmed = false
+    private var hwdecUsedForCurrentFile: String?
+    private var hwdecFallbackReported = false
+    private var hwdecFallbackAlertPending = false
+    private var lastScenePhase: ScenePhase = .active
+    private var lastScenePhaseChange: Date?
     #if os(tvOS)
     private var videoGamma: String = ""
     #endif
@@ -176,10 +169,28 @@ final class MPVBackend: PlayerBackend {
     /// Set by PlayerService to collapse the player sheet.
     var onPiPDidStart: (() -> Void)?
 
+    /// Layer mirroring the rendered frames for the tabletop reflection
+    /// (`MPVReflectionView`). Frames flow only while `setReflectionEnabled(true)`.
+    var reflectionLayer: CALayer? { _playerView?.reflectionLayer }
+
+    func setReflectionEnabled(_ enabled: Bool) {
+        guard let view = _playerView, view.isReflectionEnabled != enabled else { return }
+        MPVLogging.log("MPVBackend.setReflectionEnabled", details: "enabled:\(enabled)")
+        view.isReflectionEnabled = enabled
+    }
+
     /// Pause video rendering (for smooth panscan animation)
     func pauseRendering() {
         MPVLogging.log("MPVBackend.pauseRendering called")
         _playerView?.pauseRendering()
+    }
+
+    /// Stretch the video over the whole view (ignoring its aspect ratio)
+    /// instead of letterboxing it.
+    func setVideoFillsFrame(_ fills: Bool) {
+        guard fills != videoFillsFrame else { return }
+        videoFillsFrame = fills
+        mpvClient?.setProperty("keepaspect", !fills)
     }
 
     /// Resume video rendering
@@ -421,7 +432,8 @@ final class MPVBackend: PlayerBackend {
             LoggingService.shared.debug("MPV: Disabling EDL for live stream (live streams not compatible with EDL)", category: .mpv)
         }
         
-        LoggingService.shared.logMPV("MPV loading stream", details: "\(stream.qualityLabel) - \(stream.format)\n\(stream.url.absoluteString)\nEDL: \(actualUseEDL) (requested: \(useEDL), isLive: \(stream.isLive))\nStream info: videoCodec=\(stream.videoCodec ?? "nil"), audioCodec=\(stream.audioCodec ?? "nil")")
+        resetHwdecFallbackTracking()
+        LoggingService.shared.logMPV("MPV loading stream", details:"\(stream.qualityLabel) - \(stream.format)\n\(stream.url.absoluteString)\nEDL: \(actualUseEDL) (requested: \(useEDL), isLive: \(stream.isLive))\nStream info: videoCodec=\(stream.videoCodec ?? "nil"), audioCodec=\(stream.audioCodec ?? "nil")")
         if let audioStream {
             LoggingService.shared.logMPV("MPV loading separate audio track", details: "\(audioStream.audioLanguage ?? "default") - \(audioStream.format)\n\(audioStream.url.absoluteString)\nAudio codec: \(audioStream.audioCodec ?? "nil")")
         }
@@ -437,10 +449,8 @@ final class MPVBackend: PlayerBackend {
 
         // Store for potential retries
         currentStream = stream
-        currentAudioStream = audioStream
-        pendingAutoplay = autoplay
-        pendingUseEDL = actualUseEDL
         retryCount = 0
+        loadedStreamHasVideo = !stream.isAudioOnly
 
         // Reset retry state in UI
         delegate?.backend(self, didUpdateRetryState: 0, maxRetries: maxRetries, isRetrying: false, exhausted: false)
@@ -448,8 +458,6 @@ final class MPVBackend: PlayerBackend {
         // Try loading with retries
         try await loadWithRetry(stream: stream, audioStream: audioStream, autoplay: autoplay, useEDL: actualUseEDL, loadingID: loadingID)
     }
-
-    private var pendingUseEDL: Bool = true
 
     private func loadWithRetry(stream: Stream, audioStream: Stream?, autoplay: Bool, useEDL: Bool, loadingID: UUID) async throws {
         // Check if this load operation was cancelled (a new load started)
@@ -485,7 +493,6 @@ final class MPVBackend: PlayerBackend {
         mpvClient?.removeAllSubtitlesAsync()
 
         // Clear stale track info; the observer repopulates it once the new file loads
-        currentTracks = []
         delegate?.backend(self, didUpdateTracks: [])
 
         // Reset first-frame tracking for new content
@@ -499,6 +506,10 @@ final class MPVBackend: PlayerBackend {
 
         // Clear the render view to black to hide any old frame from previous video
         renderView?.clearToBlack()
+        #if !os(macOS) && !targetEnvironment(simulator)
+        // Audio-only streams have nothing to draw; don't render at display rate.
+        renderView?.hasNoVideo = stream.isAudioOnly
+        #endif
 
         // Load the stream
         do {
@@ -507,7 +518,7 @@ final class MPVBackend: PlayerBackend {
                 audioURL: audioStream?.url,
                 httpHeaders: stream.httpHeaders,
                 useEDL: useEDL,
-                disableVideoTrack: stream.requiresVideoTrackDisabled
+                disableVideoTrack: stream.requiresVideoTrackDisabled || isVideoDisabledForBackground
             )
             
             // Give MPV a moment to process the loadfile command
@@ -608,8 +619,6 @@ final class MPVBackend: PlayerBackend {
     private func resetRetryState() {
         retryCount = 0
         currentStream = nil
-        currentAudioStream = nil
-        pendingAutoplay = false
         delegate?.backend(self, didUpdateRetryState: 0, maxRetries: maxRetries, isRetrying: false, exhausted: false)
     }
 
@@ -780,6 +789,8 @@ final class MPVBackend: PlayerBackend {
         duration = 0
         bufferedTime = 0
         currentStream = nil
+        loadedStreamHasVideo = false
+        resetHwdecFallbackTracking()
         #if os(tvOS)
         videoGamma = ""
         clearTVDisplayCriteria()
@@ -853,43 +864,6 @@ final class MPVBackend: PlayerBackend {
     private var pendingInitialSeek = false
 
 
-    // MARK: - Backend Switching
-
-    func captureState() -> BackendState {
-        BackendState(
-            currentTime: currentTime,
-            duration: duration,
-            rate: _rate,
-            volume: _volume,
-            isMuted: _isMuted,
-            isPlaying: isPlaying
-        )
-    }
-
-    func restore(state: BackendState) async {
-        _rate = state.rate
-        _volume = state.volume
-        _isMuted = state.isMuted
-
-        // Apply to MPV
-        mpvClient?.setProperty("speed", Double(state.rate))
-        mpvClient?.setProperty("volume", Double(state.volume * 100))
-        mpvClient?.setProperty("mute", state.isMuted)
-
-        if state.currentTime > 0 {
-            await seek(to: state.currentTime)
-        }
-
-        if state.isPlaying {
-            play()
-        }
-    }
-
-    func prepareForHandoff() {
-        mpvClient?.pause()
-        isPlaying = false
-    }
-
     // MARK: - Subtitles
 
     /// Load and display a caption/subtitle track.
@@ -910,11 +884,6 @@ final class MPVBackend: PlayerBackend {
         LoggingService.shared.debug("MPV: Loading subtitle: \(caption.displayName)", category: .mpv)
         mpvClient?.addSubtitleAsync(caption.url, select: true)
         currentCaption = caption
-    }
-
-    /// Get the currently loaded caption.
-    func getCurrentCaption() -> Caption? {
-        currentCaption
     }
 
     // MARK: - Embedded Tracks
@@ -943,16 +912,6 @@ final class MPVBackend: PlayerBackend {
     /// Caller passes milliseconds; MPVClient converts to seconds.
     func updateAudioDelay(milliseconds: Double) {
         mpvClient?.updateAudioDelay(milliseconds: milliseconds)
-    }
-
-    /// Get the actual video track dimensions from MPV.
-    /// Returns (width, height) or nil if not available.
-    func getVideoSize() -> (width: Int, height: Int)? {
-        // Use cached values (updated via property observation) to avoid sync fetch
-        guard videoWidth > 0, videoHeight > 0 else {
-            return nil
-        }
-        return (videoWidth, videoHeight)
     }
 
     /// Get debug statistics from MPV for the debug overlay.
@@ -1031,6 +990,21 @@ final class MPVBackend: PlayerBackend {
         MPVLogging.logAppLifecycle("handleScenePhase(\(phase))",
             isPiPActive: pipActive, isRendering: nil)
 
+        if phase != lastScenePhase {
+            lastScenePhase = phase
+            lastScenePhaseChange = Date()
+        }
+        if phase == .active, hwdecFallbackAlertPending {
+            hwdecFallbackAlertPending = false
+            delegate?.backendDidFallBackToSoftwareDecoding(self)
+        }
+
+        #if os(iOS)
+        if phase == .active {
+            restoreVideoAfterBackground()
+        }
+        #endif
+
         guard !pipActive else {
             MPVLogging.log("handleScenePhase: skipping (pip:\(pipActive))")
             return
@@ -1050,6 +1024,9 @@ final class MPVBackend: PlayerBackend {
             #else
             (playerView as? MPVRenderView)?.pauseRendering()
             #endif
+            #if os(iOS)
+            scheduleBackgroundVideoDisable()
+            #endif
 
         case .active:
             // Resume rendering
@@ -1067,6 +1044,73 @@ final class MPVBackend: PlayerBackend {
             break
         }
     }
+
+    // MARK: - Background Video Decoding
+
+    #if os(iOS)
+    /// Seconds in the background before video decoding is turned off, so a
+    /// quick app switch returns without the resync hitch.
+    private static let backgroundVideoDisableDelay: TimeInterval = 5
+
+    private var backgroundVideoDisableWork: DispatchWorkItem?
+    #endif
+
+    /// Video decoding is off (`vid=no`) because the app is in the background
+    /// without PiP. Pausing rendering alone keeps mpv decoding every frame
+    /// (hardware decode plus a copy back to memory) only to drop it, which
+    /// heats the device during long background playback.
+    private var isVideoDisabledForBackground = false
+
+    /// Whether the loaded stream has a video track to decode. (`currentStream`
+    /// is only kept for retries and is cleared once loading succeeds.)
+    private var loadedStreamHasVideo = false
+
+    #if os(iOS)
+    private func scheduleBackgroundVideoDisable() {
+        backgroundVideoDisableWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.disableVideoForBackground()
+        }
+        backgroundVideoDisableWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.backgroundVideoDisableDelay, execute: work)
+    }
+
+    private func disableVideoForBackground() {
+        backgroundVideoDisableWork = nil
+        guard !isVideoDisabledForBackground, !isPiPActive, loadedStreamHasVideo else { return }
+        isVideoDisabledForBackground = true
+        LoggingService.shared.info("MPV: Disabling video decoding in background", category: .mpv)
+        mpvClient?.setProperty("vid", "no")
+    }
+
+    private func restoreVideoAfterBackground() {
+        backgroundVideoDisableWork?.cancel()
+        backgroundVideoDisableWork = nil
+        guard isVideoDisabledForBackground else { return }
+        isVideoDisabledForBackground = false
+        // A stream loaded while disabled may be audio-only (vid stays off)
+        guard loadedStreamHasVideo else { return }
+
+        LoggingService.shared.info("MPV: Re-enabling video decoding at \(String(format: "%.2f", currentTime))s", category: .mpv)
+        mpvClient?.setProperty("vid", "auto")
+        // Video re-enabled live starts behind the audio (see
+        // handlePlayerSheetVisibility); an exact seek to the current position
+        // restarts both in sync.
+        mpvClient?.seekAsync(to: currentTime, mode: "absolute+exact")
+
+        // Report how well audio and video line up once playback settles
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let client = self?.mpvClient else { return }
+            let avsync = await client.getDoubleAsync("avsync")
+            let drops = await client.getDoubleAsync("frame-drop-count")
+            LoggingService.shared.info(
+                "MPV: Video resynced after background - avsync=\(avsync.map { String(format: "%.3f", $0) } ?? "n/a")s, dropped=\(drops.map { String(Int($0)) } ?? "n/a")",
+                category: .mpv
+            )
+        }
+    }
+    #endif
 
     /// Handles player sheet visibility changes for background audio playback.
     /// - Parameter isVisible: true when sheet appears, false when it disappears
@@ -1244,22 +1288,6 @@ final class MPVBackend: PlayerBackend {
         pipBridge.enqueueFrame(pixelBuffer, presentationTime: presentationTime)
     }
 
-    /// Clean up PiP resources.
-    func cleanupPiP() {
-        _playerView?.captureFramesForPiP = false
-        _playerView?.onFrameReady = nil
-        pipBridge?.cleanup()
-        pipBridge = nil
-        isPiPSetUp = false
-    }
-
-    /// Move the PiP layer to a new container view.
-    /// Call this before starting PiP from fullscreen to ensure the layer
-    /// is in the main window's view hierarchy.
-    func movePiPLayer(to containerView: UIView) {
-        pipBridge?.moveLayer(to: containerView)
-    }
-
     #elseif os(macOS)
 
     // MARK: - Picture-in-Picture (macOS)
@@ -1427,20 +1455,6 @@ final class MPVBackend: PlayerBackend {
 
         pipBridge.enqueueFrame(pixelBuffer, presentationTime: presentationTime)
     }
-
-    /// Clean up PiP resources.
-    func cleanupPiP() {
-        _playerView?.captureFramesForPiP = false
-        _playerView?.onFrameReady = nil
-        pipBridge?.cleanup()
-        pipBridge = nil
-        isPiPSetUp = false
-    }
-
-    /// Move the PiP layer to a new container view.
-    func movePiPLayer(to containerView: NSView) {
-        pipBridge?.moveLayer(to: containerView)
-    }
     #endif
 
     // MARK: - Private Methods
@@ -1581,6 +1595,9 @@ final class MPVBackend: PlayerBackend {
 
 extension MPVBackend: MPVClientDelegate {
     nonisolated func mpvClient(_ client: MPVClient, didUpdateProperty property: String, value: Any?) {
+        if PerfCounter.enabled {
+            PerfCounter.count("mpv.property." + property)
+        }
         Task { @MainActor [weak self] in
             self?.handlePropertyChange(property: property, value: value)
         }
@@ -1599,7 +1616,6 @@ extension MPVBackend: MPVClientDelegate {
     nonisolated func mpvClient(_ client: MPVClient, didUpdateTrackList tracks: [MPVTrack]) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.currentTracks = tracks
             self.delegate?.backend(self, didUpdateTracks: tracks)
         }
     }
@@ -1635,6 +1651,9 @@ extension MPVBackend: MPVClientDelegate {
             if let paused = value as? Bool {
                 LoggingService.shared.debug("MPV: pause = \(paused), isReady = \(isReady), hasReachedEOF = \(hasReachedEOF)", category: .mpv)
                 isPlaying = !paused
+                #if !os(macOS) && !targetEnvironment(simulator)
+                renderView?.isPlaybackPaused = paused
+                #endif
                 // Only send state changes after we're ready (have actual video)
                 // This prevents premature transition from loading to playing
                 // Don't override ended state when MPV pauses at EOF (keep-open=yes)
@@ -1653,16 +1672,6 @@ extension MPVBackend: MPVClientDelegate {
         case "speed":
             if let speed = value as? Double {
                 _rate = Float(speed)
-            }
-
-        case "volume":
-            if let vol = value as? Double {
-                _volume = Float(vol / 100)
-            }
-
-        case "mute":
-            if let muted = value as? Bool {
-                _isMuted = muted
             }
 
         case "core-idle":
@@ -1773,6 +1782,7 @@ extension MPVBackend: MPVClientDelegate {
         case "hwdec-current":
             if let hwdec = value as? String {
                 hwdecCurrent = hwdec
+                checkHwdecFallback(hwdec, source: "event")
             }
 
         case "hwdec-interop":
@@ -1918,6 +1928,7 @@ extension MPVBackend: MPVClientDelegate {
         switch event {
         case MPV_EVENT_FILE_LOADED:
             LoggingService.shared.debug("MPV: File loaded", category: .mpv)
+            hwdecTrackingArmed = true
             startPlaybackStatsLogging()
             // Log hwdec diagnostics on tvOS (use cached values to avoid sync fetch)
             #if os(tvOS)
@@ -2076,6 +2087,71 @@ extension MPVBackend: MPVClientDelegate {
         LoggingService.shared.debug("MPV: Buffer stall detection stopped", category: .mpv)
     }
 
+    // MARK: - Hardware Decoding Fallback Detection
+
+    /// Decoder state for diagnostics heartbeats, from cached values (no mpv fetch).
+    var decoderDiagnosticsSummary: String {
+        "codec=\(videoCodec.isEmpty ? "none" : videoCodec) hwdec=\(hwdecCurrent.isEmpty ? "none" : hwdecCurrent)"
+            + " hwUsedThisFile=\(hwdecUsedForCurrentFile ?? "no") fallbackReported=\(hwdecFallbackReported)"
+    }
+
+    private func resetHwdecFallbackTracking() {
+        hwdecTrackingArmed = false
+        hwdecUsedForCurrentFile = nil
+        hwdecFallbackReported = false
+    }
+
+    /// Detects mpv dropping from hardware to software decoding mid-file.
+    /// Armed at FILE_LOADED so stale events from the previous file are ignored;
+    /// only a file that was seen hardware decoded can report a fallback.
+    private func checkHwdecFallback(_ hwdec: String, source: String) {
+        // The poll sees silent fallbacks the property event misses; keep the cache current.
+        if !hwdec.isEmpty { hwdecCurrent = hwdec }
+        guard hwdecTrackingArmed, !hwdec.isEmpty else { return }
+
+        guard hwdec == "no" else {
+            if hwdecFallbackReported {
+                LoggingService.shared.warning("MPV: Hardware decoding resumed (\(hwdec), via \(source))", category: .mpv)
+                hwdecFallbackReported = false
+            }
+            hwdecUsedForCurrentFile = hwdec
+            return
+        }
+
+        guard let previous = hwdecUsedForCurrentFile, !hwdecFallbackReported,
+              LoggingService.shared.isEnabled else { return }
+        hwdecFallbackReported = true
+
+        var context = [
+            "hwdec: \(previous) -> no (detected via \(source))",
+            "codec: \(videoCodec.isEmpty ? "unknown" : videoCodec) \(videoWidth)x\(videoHeight)"
+                + " stream=\(currentStream?.qualityLabel ?? "?") \(currentStream?.format ?? "")",
+            "playback: time=\(Int(currentTime))/\(Int(duration)) playing=\(isPlaying)",
+            "scene: \(lastScenePhase)"
+                + (lastScenePhaseChange.map { String(format: " (changed %.0fs ago)", Date().timeIntervalSince($0)) } ?? " (no change since launch)"),
+            "thermal: \(ProcessInfo.processInfo.thermalState.rawValue)"
+                + " lowPower: \(ProcessInfo.processInfo.isLowPowerModeEnabled)",
+        ]
+        #if os(iOS) || os(macOS)
+        context.append("pip: \(isPiPActive)")
+        #endif
+        let recentLines = mpvClient?.recentLogLines().map(\.formatted) ?? []
+        context.append("recent mpv log (\(recentLines.count) lines):")
+        context.append(contentsOf: recentLines)
+
+        LoggingService.shared.warning(
+            "MPV: Hardware decoding fell back to software mid-playback",
+            category: .mpv,
+            details: context.joined(separator: "\n")
+        )
+
+        if lastScenePhase == .active {
+            delegate?.backendDidFallBackToSoftwareDecoding(self)
+        } else {
+            hwdecFallbackAlertPending = true
+        }
+    }
+
     // MARK: - Playback Stats Logging
 
     /// Log cache/frame-drop/pacing stats every 10s while a file is loaded, at INFO level
@@ -2099,11 +2175,21 @@ extension MPVBackend: MPVClientDelegate {
                 // watchdog below). Elsewhere the batched mpv_get_property
                 // calls contend with the playback core and caused a visible
                 // stutter every 10s on tvOS, so skip the fetch entirely
-                // unless verbose logging wants the stats line.
-                guard MPVLogging.verboseEnabled else { continue }
+                // unless verbose logging wants the stats line. The single
+                // hwdec-current read is the fallback detector's poll.
+                guard MPVLogging.verboseEnabled else {
+                    if LoggingService.shared.isEnabled, self.hwdecUsedForCurrentFile != nil,
+                       let hwdec = await client.getStringAsync("hwdec-current") {
+                        self.checkHwdecFallback(hwdec, source: "poll")
+                    }
+                    continue
+                }
                 #endif
 
                 let props = await client.getDebugPropertiesAsync()
+                if let hwdec = props.hwdecCurrent {
+                    self.checkHwdecFallback(hwdec, source: "poll")
+                }
 
                 #if os(macOS)
                 // Render watchdog — runs every tick regardless of the verbose

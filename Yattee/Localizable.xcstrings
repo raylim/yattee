@@ -109,9 +109,6 @@
         }
       }
     },
-    "%lld/1000" : {
-
-    },
     "%lld%%" : {
 
     },
@@ -140,7 +137,476 @@
     "+%lld" : {
 
     },
+    "${command} in Yattee" : {
+
+    },
+    "0.5×" : {
+
+    },
+    "0.25×" : {
+
+    },
+    "0.75×" : {
+
+    },
     "1.2M subscribers" : {
+
+    },
+    "1.5×" : {
+
+    },
+    "1.25×" : {
+
+    },
+    "1.75×" : {
+
+    },
+    "2.5×" : {
+
+    },
+    "2×" : {
+
+    },
+    "3×" : {
+
+    },
+    "accounts.activate" : {
+      "comment" : "Action putting an inactive account back in use",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activate"
+          }
+        }
+      }
+    },
+    "accounts.addAccount" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add Account"
+          }
+        }
+      }
+    },
+    "accounts.capability.history" : {
+      "comment" : "Capability hint on an account row",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Watch history"
+          }
+        }
+      }
+    },
+    "accounts.capability.playlists" : {
+      "comment" : "Capability hint on an account row",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Playlists"
+          }
+        }
+      }
+    },
+    "accounts.capability.subscriptions" : {
+      "comment" : "Capability hint on an account row",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscriptions"
+          }
+        }
+      }
+    },
+    "accounts.current" : {
+      "comment" : "Marks the account the app is currently using",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Current"
+          }
+        }
+      }
+    },
+    "accounts.deactivate" : {
+      "comment" : "Action setting an account inactive without signing it out",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Deactivate"
+          }
+        }
+      }
+    },
+    "accounts.empty.description" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to an Invidious or Piped source to add an account."
+          }
+        }
+      }
+    },
+    "accounts.empty.openSources" : {
+      "comment" : "tvOS button on the empty Accounts screen that opens the Sources list",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Sources"
+          }
+        }
+      }
+    },
+    "accounts.empty.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No Accounts"
+          }
+        }
+      }
+    },
+    "accounts.orphan.footer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "These accounts belong to a source that is not on this device. It may still arrive from iCloud — removing an account here deletes its saved login."
+          }
+        }
+      }
+    },
+    "accounts.orphan.section" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Source Missing"
+          }
+        }
+      }
+    },
+    "accounts.orphan.unnamed" : {
+      "comment" : "Title of an account whose source is gone and which has no label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Account"
+          }
+        }
+      }
+    },
+    "accounts.playlists.error.entryMismatch" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This playlist changed on the server. Refresh and try again."
+          }
+        }
+      }
+    },
+    "accounts.playlists.error.instanceNotConfigured" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This account's instance is unavailable."
+          }
+        }
+      }
+    },
+    "accounts.playlists.error.notAuthenticated" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to this account to manage its playlists."
+          }
+        }
+      }
+    },
+    "accounts.playlists.error.notSupported" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This instance does not support playlists."
+          }
+        }
+      }
+    },
+    "accounts.remove.confirm.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved login is deleted, and the account is removed from your other devices too."
+          }
+        }
+      }
+    },
+    "accounts.remove.confirm.message.orphan" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The saved login is deleted, and the account is removed from your other devices too. Its source is already gone from this device."
+          }
+        }
+      }
+    },
+    "accounts.remove.confirm.title %@" : {
+      "comment" : "Confirmation title with the account name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remove \"%@\"?"
+          }
+        }
+      }
+    },
+    "accounts.rename" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rename"
+          }
+        }
+      }
+    },
+    "accounts.rename.message %@" : {
+      "comment" : "Rename alert body, naming what an empty field goes back to",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This name is shown on all your devices. Leave it empty to go back to \"%@\"."
+          }
+        }
+      }
+    },
+    "accounts.rename.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rename Account"
+          }
+        }
+      }
+    },
+    "accounts.showPickers" : {
+      "comment" : "Toggle on the accounts screen controlling whether account switchers appear outside Settings",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show Account Pickers"
+          }
+        }
+      }
+    },
+    "accounts.showPickers.footer" : {
+      "comment" : "Footer of the account pickers visibility toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show buttons for switching accounts outside of Settings, such as in toolbars."
+          }
+        }
+      }
+    },
+    "accounts.signIn.identityChanged" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Your iCloud account changed while signing in. Try again."
+          }
+        }
+      }
+    },
+    "accounts.signIn.identityUnresolved" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Waiting for iCloud. Try signing in again in a moment."
+          }
+        }
+      }
+    },
+    "accounts.signIn.storeFailed" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The login could not be saved to the Keychain."
+          }
+        }
+      }
+    },
+    "accounts.signInOnThisDevice" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign In on This Device"
+          }
+        }
+      }
+    },
+    "accounts.status.checking" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking…"
+          }
+        }
+      }
+    },
+    "accounts.status.credentialMissing" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in required"
+          }
+        }
+      }
+    },
+    "accounts.status.credentialRejected" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in again"
+          }
+        }
+      }
+    },
+    "accounts.status.inactive" : {
+      "comment" : "Status of an account the user set to inactive",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inactive"
+          }
+        }
+      }
+    },
+    "accounts.status.instanceDisabled" : {
+      "comment" : "Status of an account whose source has been switched off",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Source switched off"
+          }
+        }
+      }
+    },
+    "accounts.status.instanceMissing" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Source missing"
+          }
+        }
+      }
+    },
+    "accounts.status.signedIn" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Signed in"
+          }
+        }
+      }
+    },
+    "accounts.status.unreachable" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unreachable"
+          }
+        }
+      }
+    },
+    "accounts.switcher.section" : {
+      "comment" : "Header of the accounts screen section holding the account switcher",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Current Account"
+          }
+        }
+      }
+    },
+    "accounts.switcher.title" : {
+      "comment" : "Label of the control that switches the selected account",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Account"
+          }
+        }
+      }
+    },
+    "accounts.title" : {
+      "comment" : "Title of the accounts screen",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Accounts"
+          }
+        }
+      }
+    },
+    "accounts.useThisAccount" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use This Account"
+          }
+        }
+      }
+    },
+    "Add ${link} to queue (${position})" : {
+
+    },
+    "Add Video to Queue" : {
+
+    },
+    "Adds a video to Yattee's queue, to play next or at the end." : {
+
+    },
+    "Adds a video to your Yattee bookmarks." : {
 
     },
     "alert.ambiguousLink.message %@" : {
@@ -242,6 +708,9 @@
           }
         }
       }
+    },
+    "Back By" : {
+
     },
     "batchDownload.complete.allSkipped.subtitle" : {
       "comment" : "Toast subtitle when all videos were already downloaded",
@@ -452,6 +921,12 @@
         }
       }
     },
+    "Bookmark ${link}" : {
+
+    },
+    "Bookmark Video" : {
+
+    },
     "bookmark.remove.confirm" : {
       "localizations" : {
         "en" : {
@@ -532,6 +1007,9 @@
         }
       }
     },
+    "Bookmarks" : {
+
+    },
     "bookmarks.search.placeholder" : {
       "localizations" : {
         "en" : {
@@ -541,6 +1019,12 @@
           }
         }
       }
+    },
+    "Changes the speed of what's playing in Yattee." : {
+
+    },
+    "Channel Link" : {
+
     },
     "channel.menu.disableNotifications" : {
       "localizations" : {
@@ -572,12 +1056,56 @@
         }
       }
     },
+    "channel.menu.subscribe.withAccount" : {
+      "comment" : "Menu item; %@ is the account or destination the subscribe writes to",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscribe - %@"
+          }
+        }
+      }
+    },
+    "channel.menu.subscribeOn" : {
+      "comment" : "Submenu listing the accounts a channel can be subscribed on",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscribe On…"
+          }
+        }
+      }
+    },
+    "channel.menu.title" : {
+      "comment" : "Accessible name of the channel toolbar menu",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscription Options"
+          }
+        }
+      }
+    },
     "channel.menu.unsubscribe" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Unsubscribe"
+          }
+        }
+      }
+    },
+    "channel.menu.unsubscribe.withAccount" : {
+      "comment" : "Menu item; %@ is the account or destination the unsubscribe writes to",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unsubscribe - %@"
           }
         }
       }
@@ -639,6 +1167,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Search in channel"
+          }
+        }
+      }
+    },
+    "channel.subscribe.contextUnavailable" : {
+      "comment" : "Menu hint when the selected account cannot be subscribed on right now",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The selected account is unavailable. Pick a destination below."
+          }
+        }
+      }
+    },
+    "channel.subscribe.destination.subscribed" : {
+      "comment" : "Toast title after subscribing on a named destination",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscribed"
+          }
+        }
+      }
+    },
+    "channel.subscribe.destination.unsubscribed" : {
+      "comment" : "Toast title after unsubscribing on a named destination",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unsubscribed"
           }
         }
       }
@@ -840,6 +1401,18 @@
         }
       }
     },
+    "Close" : {
+
+    },
+    "Close Player" : {
+
+    },
+    "Close Video" : {
+
+    },
+    "Command" : {
+
+    },
     "comments.disabled" : {
       "comment" : "Shown when comments are disabled for a video",
       "localizations" : {
@@ -954,16 +1527,6 @@
         }
       }
     },
-    "commentsPill.mode.title" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Comments"
-          }
-        }
-      }
-    },
     "common.add" : {
       "localizations" : {
         "en" : {
@@ -1000,6 +1563,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Authentication Required"
+          }
+        }
+      }
+    },
+    "common.badge.new" : {
+      "comment" : "Badge shown next to recently added items",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "NEW"
           }
         }
       }
@@ -1161,6 +1735,17 @@
         }
       }
     },
+    "common.loadingStopped" : {
+      "comment" : "Shown in place of content after the user cancels a slow load on tvOS",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Loading was stopped."
+          }
+        }
+      }
+    },
     "common.loadMore" : {
       "localizations" : {
         "en" : {
@@ -1306,6 +1891,17 @@
         }
       }
     },
+    "common.skip" : {
+      "comment" : "Button that passes over an optional step",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Skip"
+          }
+        }
+      }
+    },
     "common.unit.points" : {
       "localizations" : {
         "en" : {
@@ -1337,6 +1933,12 @@
         }
       }
     },
+    "Continue" : {
+
+    },
+    "Continue Watching" : {
+
+    },
     "continueWatching.clearAll" : {
       "comment" : "Clear all continue watching entries",
       "localizations" : {
@@ -1344,6 +1946,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Clear All"
+          }
+        }
+      }
+    },
+    "continueWatching.empty.search" : {
+      "comment" : "tvOS button on the empty Continue Watching screen that opens Search",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Search Videos"
           }
         }
       }
@@ -1358,6 +1971,9 @@
           }
         }
       }
+    },
+    "Control Player" : {
+
     },
     "controls.button.addToPlaylist" : {
       "localizations" : {
@@ -1379,22 +1995,22 @@
         }
       }
     },
-    "controls.button.audioTrack" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Audio Track"
-          }
-        }
-      }
-    },
     "controls.button.audioMode" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Audio Mode"
+          }
+        }
+      }
+    },
+    "controls.button.audioTrack" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Audio Track"
           }
         }
       }
@@ -2023,6 +2639,17 @@
         }
       }
     },
+    "deepLink.unsupported.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't open link"
+          }
+        }
+      }
+    },
     "discovery.empty.description" : {
       "comment" : "Description when no network shares are found",
       "localizations" : {
@@ -2102,6 +2729,7 @@
     },
     "discovery.shareType.smb" : {
       "comment" : "SMB share type name",
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2113,6 +2741,7 @@
     },
     "discovery.shareType.webdav" : {
       "comment" : "WebDAV share type name",
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2124,6 +2753,7 @@
     },
     "discovery.shareType.webdavs" : {
       "comment" : "WebDAV (SSL) share type name",
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2165,6 +2795,12 @@
           }
         }
       }
+    },
+    "Download ${link}" : {
+
+    },
+    "Download Video" : {
+
     },
     "download.error.audioRequired" : {
       "localizations" : {
@@ -2297,6 +2933,12 @@
         }
       }
     },
+    "Downloads" : {
+
+    },
+    "Downloads a video in Yattee at your preferred download quality." : {
+
+    },
     "downloads.cancel" : {
       "comment" : "Cancel in-progress download context menu item",
       "localizations" : {
@@ -2373,17 +3015,6 @@
         }
       }
     },
-    "downloads.retry" : {
-      "comment" : "Retry failed download button",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Retry"
-          }
-        }
-      }
-    },
     "downloads.resume" : {
       "comment" : "Resume paused download context menu item",
       "localizations" : {
@@ -2391,6 +3022,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Resume"
+          }
+        }
+      }
+    },
+    "downloads.retry" : {
+      "comment" : "Retry failed download button",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry"
           }
         }
       }
@@ -2536,6 +3178,9 @@
         }
       }
     },
+    "End of Queue" : {
+
+    },
     "error.noInstance" : {
 
     },
@@ -2672,6 +3317,9 @@
         }
       }
     },
+    "Feed" : {
+
+    },
     "feed.error.notLoggedIn" : {
       "comment" : "Error when trying to view feed without being logged in",
       "localizations" : {
@@ -2696,6 +3344,9 @@
           }
         }
       }
+    },
+    "Forward By" : {
+
     },
     "gestures.action.cyclePlaybackSpeed" : {
       "extractionState" : "extracted_with_value",
@@ -3566,6 +4217,37 @@
         }
       }
     },
+    "Get Now Playing" : {
+
+    },
+    "Go Back" : {
+
+    },
+    "History" : {
+
+    },
+    "history.remote.delete.error" : {
+      "comment" : "Removing a video from the account's server-side history failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not remove from history"
+          }
+        }
+      }
+    },
+    "history.remote.load.error" : {
+      "comment" : "Loading the account's server-side history failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not load history"
+          }
+        }
+      }
+    },
     "history.search.placeholder" : {
       "localizations" : {
         "en" : {
@@ -3575,6 +4257,9 @@
           }
         }
       }
+    },
+    "Home" : {
+
     },
     "home.bookmarks.empty" : {
       "comment" : "Empty bookmarks message",
@@ -3890,6 +4575,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Your watch history will appear here."
+          }
+        }
+      }
+    },
+    "home.history.metadataRetry" : {
+      "comment" : "Context menu item that asks again for a history row's metadata",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Try Again"
+          }
+        }
+      }
+    },
+    "home.history.metadataUnavailable" : {
+      "comment" : "Title for a history row whose video details could not be fetched",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Details unavailable"
           }
         }
       }
@@ -4823,6 +5530,17 @@
         }
       }
     },
+    "import.playlists.loginChanged" : {
+      "comment" : "Error message when the account was signed out or replaced during an import",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The login changed while importing, so the rest was not added."
+          }
+        }
+      }
+    },
     "import.playlists.mergeWarning.merge" : {
       "comment" : "Button to confirm merging videos into existing playlist",
       "localizations" : {
@@ -4904,9 +5622,21 @@
       "comment" : "Video count label for playlist row",
       "localizations" : {
         "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld videos"
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "1 video"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld videos"
+                }
+              }
+            }
           }
         }
       }
@@ -4961,7 +5691,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No subscriptions found on this Invidious instance."
+            "value" : "No subscriptions found on this instance."
           }
         }
       }
@@ -5035,12 +5765,24 @@
     "Initializing player..." : {
 
     },
-    "instance.add" : {
+    "instance.browse.copyURL" : {
+      "comment" : "Menu item to copy the browsed instance's URL",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Add Instance"
+            "value" : "Copy URL"
+          }
+        }
+      }
+    },
+    "instance.browse.edit %@" : {
+      "comment" : "Menu item to edit the browsed instance, with its name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Edit %@"
           }
         }
       }
@@ -5055,6 +5797,28 @@
         }
       }
     },
+    "instance.browse.openInBrowser" : {
+      "comment" : "Menu item to open the browsed instance's URL in the browser",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open in Browser"
+          }
+        }
+      }
+    },
+    "instance.browse.remove %@" : {
+      "comment" : "Menu item to remove the browsed instance, with its name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remove %@"
+          }
+        }
+      }
+    },
     "instance.browse.search.placeholder" : {
       "localizations" : {
         "en" : {
@@ -5065,82 +5829,13 @@
         }
       }
     },
-    "instance.disabled" : {
+    "instance.browse.signOut %@" : {
+      "comment" : "Menu item to sign out and remove an account, with its name",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Disabled"
-          }
-        }
-      }
-    },
-    "instance.enabled" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enabled"
-          }
-        }
-      }
-    },
-    "instance.error.detectionFailed" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Could not detect instance type. Please check the URL."
-          }
-        }
-      }
-    },
-    "instance.error.invalidURL" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invalid URL format"
-          }
-        }
-      }
-    },
-    "instance.picker.title" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Instances"
-          }
-        }
-      }
-    },
-    "instance.url.footer" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enter the URL of an Invidious, Piped, or PeerTube instance."
-          }
-        }
-      }
-    },
-    "instance.url.header" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Instance URL"
-          }
-        }
-      }
-    },
-    "instance.url.placeholder" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "https://example.com"
+            "value" : "Sign Out %@"
           }
         }
       }
@@ -5189,13 +5884,338 @@
         }
       }
     },
-    "login.email" : {
-      "comment" : "Email field label in login form",
+    "Jumps to a time in what's playing in Yattee, or forward or back by some seconds." : {
+
+    },
+    "Link" : {
+
+    },
+    "linkAction.confirm.bookmark.button" : {
+      "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
-            "state" : "translated",
-            "value" : "Email or Username"
+            "state" : "new",
+            "value" : "Bookmark"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.bookmark.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Add Bookmark?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.download.button" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Download"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.download.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Download Video?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.playlistPlayNext.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Play Playlist Next?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.playlistQueue.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Add Playlist to Queue?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.playlistVideoCount" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%lld videos"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.playNext.button" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Play Next"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.playNext.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Play Next?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.queue.button" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Add to Queue"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.queue.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Add to Queue?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.savePlaylist.button" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Save"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.savePlaylist.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Save Playlist to Library?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.subscribe.button" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Subscribe"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.subscribe.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Subscribe?"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.unsubscribe.button" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Unsubscribe"
+          }
+        }
+      }
+    },
+    "linkAction.confirm.unsubscribe.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Unsubscribe?"
+          }
+        }
+      }
+    },
+    "linkAction.done.bookmark" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Bookmarked"
+          }
+        }
+      }
+    },
+    "linkAction.done.playNext" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Playing next"
+          }
+        }
+      }
+    },
+    "linkAction.done.queue" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Added to queue"
+          }
+        }
+      }
+    },
+    "linkAction.done.subscribe" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Subscribed"
+          }
+        }
+      }
+    },
+    "linkAction.done.unsubscribe" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Unsubscribed"
+          }
+        }
+      }
+    },
+    "linkAction.error.downloadUnsupported" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Downloads aren't available on this device."
+          }
+        }
+      }
+    },
+    "linkAction.error.emptyPlaylist" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The playlist has no videos."
+          }
+        }
+      }
+    },
+    "linkAction.error.notAChannel" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The link isn't a channel."
+          }
+        }
+      }
+    },
+    "linkAction.error.nothingPlaying" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Nothing is playing."
+          }
+        }
+      }
+    },
+    "linkAction.error.queueDisabled" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The queue is turned off in Settings."
+          }
+        }
+      }
+    },
+    "linkAction.error.title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't complete the link"
+          }
+        }
+      }
+    },
+    "linkAction.error.unsupportedRate" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Supported rates: %@"
+          }
+        }
+      }
+    },
+    "linkAction.loadingPlaylist" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Loading playlist…"
           }
         }
       }
@@ -5206,7 +6226,40 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Invalid email or password"
+            "value" : "Invalid username or password"
+          }
+        }
+      }
+    },
+    "login.footer.accountUnusable" : {
+      "comment" : "Footer of the account section when a listed account cannot be used and no more specific wording applies",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "An account here cannot be used right now. Its status is shown above."
+          }
+        }
+      }
+    },
+    "login.footer.credentialMissing" : {
+      "comment" : "Footer of the account section when a listed account has no saved login on this device",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "An account here has no saved login on this device yet. Sign in to use it."
+          }
+        }
+      }
+    },
+    "login.footer.credentialRejected" : {
+      "comment" : "Footer of the account section when the server rejected a listed account's login",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The server rejected an account's login. Sign in again to use it."
           }
         }
       }
@@ -5243,12 +6296,44 @@
         }
       }
     },
+    "login.footer.optionalStep" : {
+      "comment" : "Footer of the optional sign-in step shown after adding a source",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The source has been added. You can sign in later from Settings."
+          }
+        }
+      }
+    },
     "login.footer.pipedAccount %@" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Sign in to your Piped account on %@"
+          }
+        }
+      }
+    },
+    "login.footer.unreachable" : {
+      "comment" : "Footer of the account section when the server cannot be reached",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The server could not be reached, so its accounts cannot be used right now."
+          }
+        }
+      }
+    },
+    "login.footer.yatteeServerAccount %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to your account on %@"
           }
         }
       }
@@ -5297,17 +6382,6 @@
         }
       }
     },
-    "login.logout" : {
-      "comment" : "Log out button label",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Log Out"
-          }
-        }
-      }
-    },
     "login.password" : {
       "comment" : "Password field label in login form",
       "localizations" : {
@@ -5326,6 +6400,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Sign In"
+          }
+        }
+      }
+    },
+    "login.signInAgain" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign In Again"
+          }
+        }
+      }
+    },
+    "login.signOutAndRemove" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign Out & Remove"
           }
         }
       }
@@ -5539,17 +6633,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "View Options"
-          }
-        }
-      }
-    },
-    "mediaSources.browse %@" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Browse %@"
           }
         }
       }
@@ -5824,6 +6907,36 @@
         }
       }
     },
+    "menu.playback.toggleAllPanels" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toggle All Panels"
+          }
+        }
+      }
+    },
+    "menu.playback.toggleInfoPanel" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toggle Info Panel"
+          }
+        }
+      }
+    },
+    "menu.playback.toggleSidebar" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toggle Sidebar"
+          }
+        }
+      }
+    },
     "menu.playback.volumeDown" : {
       "localizations" : {
         "en" : {
@@ -5994,51 +7107,6 @@
         }
       }
     },
-    "migration.accountsHint" : {
-      "comment" : "Hint about needing to re-add accounts after migration",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "You'll need to sign in to your accounts again in Settings after import."
-          }
-        }
-      }
-    },
-    "migration.continue" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Continue"
-          }
-        }
-      }
-    },
-    "migration.error.invalidURL" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invalid URL"
-          }
-        }
-      }
-    },
-    "migration.failedItems" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Failed to import:"
-          }
-        }
-      }
-    },
     "migration.import" : {
       "localizations" : {
         "en" : {
@@ -6055,98 +7123,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Importing..."
-          }
-        }
-      }
-    },
-    "migration.noDataFound" : {
-      "comment" : "Title when no legacy data found",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No Data Found"
-          }
-        }
-      }
-    },
-    "migration.noDataFoundDescription" : {
-      "comment" : "Description when no legacy data found",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No data from the previous version was found to import."
-          }
-        }
-      }
-    },
-    "migration.partialMessage %lld %lld" : {
-      "comment" : "Import result count",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$lld of %2$lld items imported successfully."
-          }
-        }
-      }
-    },
-    "migration.partialTitle" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Import Complete"
-          }
-        }
-      }
-    },
-    "migration.retry" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Retry Failed"
-          }
-        }
-      }
-    },
-    "migration.selectToImport" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Select instances to import:"
-          }
-        }
-      }
-    },
-    "migration.settingsFooter" : {
-      "comment" : "Footer text in settings migration view",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Select the instances you want to import from your previous Yattee installation."
-          }
-        }
-      }
-    },
-    "migration.skip" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Skip"
           }
         }
       }
@@ -6191,61 +7167,6 @@
         }
       }
     },
-    "migration.subtitle" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "We found instances from your previous installation."
-          }
-        }
-      }
-    },
-    "migration.title" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Import Your Data"
-          }
-        }
-      }
-    },
-    "migration.unreachableImport" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Import Anyway"
-          }
-        }
-      }
-    },
-    "migration.unreachableMessage" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This instance couldn't be reached. Import anyway?"
-          }
-        }
-      }
-    },
-    "migration.unreachableTitle" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Instance Unreachable"
-          }
-        }
-      }
-    },
     "miniPlayer.addButton.header" : {
       "localizations" : {
         "en" : {
@@ -6286,6 +7207,9 @@
         }
       }
     },
+    "Mode" : {
+
+    },
     "my-server.example.com" : {
 
     },
@@ -6308,6 +7232,29 @@
           }
         }
       }
+    },
+    "navigation.sourceNotFound.openSources" : {
+      "comment" : "tvOS button on the media-source-not-found screen that opens the Sources list",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Sources"
+          }
+        }
+      }
+    },
+    "Next" : {
+
+    },
+    "Next Video" : {
+
+    },
+    "Normal" : {
+
+    },
+    "Nothing is playing in Yattee." : {
+
     },
     "notification.action.watch" : {
       "comment" : "Action button on notification to watch video",
@@ -6386,89 +7333,8 @@
         }
       }
     },
-    "onboarding.cloud.complete.description" : {
-      "comment" : "iCloud sync complete description on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Your data is now syncing across devices"
-          }
-        }
-      }
-    },
-    "onboarding.cloud.complete.title" : {
-      "comment" : "iCloud sync complete title on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sync Complete"
-          }
-        }
-      }
-    },
-    "onboarding.cloud.description" : {
-      "comment" : "iCloud sync description on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Keep your subscriptions, watch history, and settings in sync across all your devices with iCloud."
-          }
-        }
-      }
-    },
-    "onboarding.cloud.enable" : {
-      "comment" : "Enable iCloud button on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enable iCloud Sync"
-          }
-        }
-      }
-    },
-    "onboarding.cloud.error.title" : {
-      "comment" : "iCloud sync error title on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sync Error"
-          }
-        }
-      }
-    },
-    "onboarding.cloud.skip" : {
-      "comment" : "Skip iCloud button on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Skip for now"
-          }
-        }
-      }
-    },
-    "onboarding.cloud.syncing.downloading" : {
-      "comment" : "Download progress text on iCloud onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Downloading existing iCloud data..."
-          }
-        }
-      }
+    "Now Playing" : {
+
     },
     "onboarding.cloud.syncing.preparing" : {
       "comment" : "Preparing sync text on iCloud onboarding",
@@ -6492,182 +7358,89 @@
         }
       }
     },
-    "onboarding.cloud.title" : {
-      "comment" : "iCloud sync title on onboarding",
-      "extractionState" : "stale",
+    "Open ${section}" : {
+
+    },
+    "Open Section" : {
+
+    },
+    "openedLinks.actions" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iCloud Sync"
+            "value" : "Actions"
           }
         }
       }
     },
-    "onboarding.cloud.unavailable" : {
-      "comment" : "iCloud unavailable message on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.addAllToQueue" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iCloud is not available. Sign in to iCloud in Settings to enable sync."
+            "value" : "Add All Videos to Queue"
           }
         }
       }
     },
-    "onboarding.continue" : {
-      "comment" : "Continue button on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.bookmarkAll" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Continue"
+            "value" : "Bookmark All Videos"
           }
         }
       }
     },
-    "onboarding.skip" : {
-      "comment" : "Skip button on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.bookmarked.subtitle %lld" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Skip"
+            "value" : "%lld videos"
           }
         }
       }
     },
-    "onboarding.sources.description" : {
-      "comment" : "Settings description on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.bookmarked.title" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Customize Yattee to your liking. Add video sources, adjust appearance, configure playback, and more."
+            "value" : "Added to Bookmarks"
           }
         }
       }
     },
-    "onboarding.sources.goToSettings" : {
-      "comment" : "Explore settings button on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.downloadAll" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Explore Settings"
+            "value" : "Download All Videos"
           }
         }
       }
     },
-    "onboarding.sources.later" : {
-      "comment" : "Get started button on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.playAll" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Get Started"
+            "value" : "Play All Videos"
           }
         }
       }
     },
-    "onboarding.sources.title" : {
-      "comment" : "Settings title on onboarding",
-      "extractionState" : "stale",
+    "openedLinks.title" : {
+      "comment" : "Title of the page listing several links opened at once",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Explore Settings"
-          }
-        }
-      }
-    },
-    "onboarding.title.privacy.description" : {
-      "comment" : "Privacy feature description on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No tracking, no ads, just content"
-          }
-        }
-      }
-    },
-    "onboarding.title.privacy.title" : {
-      "comment" : "Privacy feature title on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Privacy First"
-          }
-        }
-      }
-    },
-    "onboarding.title.sources.description" : {
-      "comment" : "Sources feature description on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Play local files, from Samba shares, WebDAV and remote servers"
-          }
-        }
-      }
-    },
-    "onboarding.title.sources.title" : {
-      "comment" : "Sources feature title on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Multiple Sources"
-          }
-        }
-      }
-    },
-    "onboarding.title.sync.description" : {
-      "comment" : "Sync feature description on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Your settings and data sync with iCloud"
-          }
-        }
-      }
-    },
-    "onboarding.title.sync.title" : {
-      "comment" : "Sync feature title on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cross-Platform Sync"
-          }
-        }
-      }
-    },
-    "onboarding.title.tagline" : {
-      "comment" : "App tagline on onboarding",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Your videos, your way"
+            "value" : "Opened Links"
           }
         }
       }
@@ -6788,7 +7561,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Supports direct video links (MP4, M4V, MOV, WebM, MKV, AVI, FLV)"
+            "value" : "Supports direct video links (MP4, M4V, MOV, WebM, MKV, AVI, FLV). Add an instance to open YouTube and PeerTube links"
           }
         }
       }
@@ -6799,7 +7572,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Supports hundreds of sites with Yattee Server"
+            "value" : "Videos, playlists and channels from YouTube and PeerTube, plus hundreds of other sites with Yattee Server"
           }
         }
       }
@@ -6810,7 +7583,29 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Supports YouTube and other compatible video links"
+            "value" : "Videos, playlists and channels from YouTube and PeerTube, plus direct video links"
+          }
+        }
+      }
+    },
+    "openLink.load" : {
+      "comment" : "Button label: show the link's video, playlist or channel screen",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Load"
+          }
+        }
+      }
+    },
+    "openLink.loadAll" : {
+      "comment" : "Button label: show several links as mixed results",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Load All"
           }
         }
       }
@@ -6832,7 +7627,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "URL is not a video"
+            "value" : "This link isn't a video"
           }
         }
       }
@@ -6854,7 +7649,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open"
+            "value" : "Play"
           }
         }
       }
@@ -6865,7 +7660,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open All"
+            "value" : "Play All"
           }
         }
       }
@@ -6969,6 +7764,17 @@
         }
       }
     },
+    "openLink.unsupportedYouTubeLink" : {
+      "comment" : "Error for a YouTube link Yattee can't open (feeds, hashtags, posts…)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This kind of YouTube link isn't supported"
+          }
+        }
+      }
+    },
     "openLink.urlCount %lld" : {
       "comment" : "URL count indicator",
       "localizations" : {
@@ -7012,6 +7818,540 @@
           }
         }
       }
+    },
+    "Opens a section of Yattee." : {
+
+    },
+    "panel.belowVideo.info" : {
+      "comment" : "Corner layout below-video content option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Info"
+          }
+        }
+      }
+    },
+    "panel.belowVideo.infoAndComments" : {
+      "comment" : "Corner layout below-video content option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Info and Comments"
+          }
+        }
+      }
+    },
+    "panel.belowVideo.nothing" : {
+      "comment" : "Corner layout below-video content option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nothing"
+          }
+        }
+      }
+    },
+    "panel.defaultVisibility.hidden" : {
+      "comment" : "Details panel default visibility option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hidden"
+          }
+        }
+      }
+    },
+    "panel.defaultVisibility.remember" : {
+      "comment" : "Details panel default visibility option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remember Last"
+          }
+        }
+      }
+    },
+    "panel.defaultVisibility.visible" : {
+      "comment" : "Details panel default visibility option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Visible"
+          }
+        }
+      }
+    },
+    "panel.layoutMode.corner" : {
+      "comment" : "Details panel layout mode option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Corner"
+          }
+        }
+      }
+    },
+    "panel.layoutMode.stacked" : {
+      "comment" : "Details panel layout mode option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Standard"
+          }
+        }
+      }
+    },
+    "panel.page.info" : {
+      "comment" : "Details panel page name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Info"
+          }
+        }
+      }
+    },
+    "panel.page.queue" : {
+      "comment" : "Details panel page name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Queue"
+          }
+        }
+      }
+    },
+    "panel.page.related" : {
+      "comment" : "Details panel page name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Related"
+          }
+        }
+      }
+    },
+    "panel.region.belowVideo" : {
+      "comment" : "Corner layout region option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Below Video"
+          }
+        }
+      }
+    },
+    "panel.region.primary" : {
+      "comment" : "Corner layout region option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Side Column"
+          }
+        }
+      }
+    },
+    "panel.settings.belowVideo" : {
+      "comment" : "Corner layout below-video content picker label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Below Video"
+          }
+        }
+      }
+    },
+    "panel.settings.belowVideo.footer" : {
+      "comment" : "Corner layout below-video content footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Corner shows the video in the top corner with pages in a side column. Only the info panel can sit below the video; comments there show as its pill. Related, chapters and queue always use the side column. The standard layout is used automatically when the window is too narrow."
+          }
+        }
+      }
+    },
+    "panel.settings.comments.pillMode" : {
+      "comment" : "Comments page editor picker label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Comments Pill"
+          }
+        }
+      }
+    },
+    "panel.settings.comments.pillMode.footer" : {
+      "comment" : "Comments page editor picker footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "How comments show below the video details: as a pill that collapses on scroll, as a button, or not at all."
+          }
+        }
+      }
+    },
+    "panel.settings.comments.showAvatars" : {
+      "comment" : "Comments page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Author Avatars"
+          }
+        }
+      }
+    },
+    "panel.settings.defaultVisibility" : {
+      "comment" : "Details panel settings picker label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When Player Opens"
+          }
+        }
+      }
+    },
+    "panel.settings.defaultVisibility.footer" : {
+      "comment" : "Details panel settings picker footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "How the details panel appears when the player opens, per orientation. Remember Last restores the panel if it was visible the last time in that orientation."
+          }
+        }
+      }
+    },
+    "panel.settings.defaultVisibility.landscape" : {
+      "comment" : "Details panel default visibility picker for the landscape layout",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Landscape"
+          }
+        }
+      }
+    },
+    "panel.settings.defaultVisibility.portrait" : {
+      "comment" : "Details panel default visibility picker for the portrait layout",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Portrait"
+          }
+        }
+      }
+    },
+    "panel.settings.elements.header" : {
+      "comment" : "Details panel page editor section header",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Elements"
+          }
+        }
+      }
+    },
+    "panel.settings.info.description.footer" : {
+      "comment" : "Details panel info editor description section footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When sections follow the description, it starts collapsed to the chosen number of lines. Tap it to expand."
+          }
+        }
+      }
+    },
+    "panel.settings.info.description.header" : {
+      "comment" : "Details panel info editor description section header",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Description"
+          }
+        }
+      }
+    },
+    "panel.settings.info.descriptionCollapsedLines" : {
+      "comment" : "Details panel info editor stepper label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Collapsed Lines"
+          }
+        }
+      }
+    },
+    "panel.settings.info.showChannelRow" : {
+      "comment" : "Info page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Channel"
+          }
+        }
+      }
+    },
+    "panel.settings.info.showDescription" : {
+      "comment" : "Info page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Description"
+          }
+        }
+      }
+    },
+    "panel.settings.info.showStatsRow" : {
+      "comment" : "Info page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Statistics"
+          }
+        }
+      }
+    },
+    "panel.settings.layoutMode" : {
+      "comment" : "Details panel layout mode picker label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Layout"
+          }
+        }
+      }
+    },
+    "panel.settings.layoutMode.footer" : {
+      "comment" : "Details panel layout mode footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Corner shows the video in the top corner with pages in a side column and below the video. The standard layout is used automatically when the window is too narrow."
+          }
+        }
+      }
+    },
+    "panel.settings.page.enabled" : {
+      "comment" : "Details panel page editor toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show Page"
+          }
+        }
+      }
+    },
+    "panel.settings.pageBarLabels" : {
+      "comment" : "Details panel page bar labels toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Page Bar Labels"
+          }
+        }
+      }
+    },
+    "panel.settings.pageBarLabels.footer" : {
+      "comment" : "Details panel page bar labels footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show a name next to each page icon. With labels off, only the selected page shows its name."
+          }
+        }
+      }
+    },
+    "panel.settings.pages.footer" : {
+      "comment" : "Details panel settings section footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pages appear in this order. The page bar shows when at least two pages are enabled; pages without content hide automatically."
+          }
+        }
+      }
+    },
+    "panel.settings.pages.header" : {
+      "comment" : "Details panel settings section header",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pages"
+          }
+        }
+      }
+    },
+    "panel.settings.queue.showHistory" : {
+      "comment" : "Queue page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Previously Played"
+          }
+        }
+      }
+    },
+    "panel.settings.queue.showHistory.footer" : {
+      "comment" : "Queue page element toggle footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Previously Played shows videos played earlier in this session above the queue. Currently Playing shows the video playing now."
+          }
+        }
+      }
+    },
+    "panel.settings.queue.showNowPlaying" : {
+      "comment" : "Queue page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Currently Playing"
+          }
+        }
+      }
+    },
+    "panel.settings.section.enabled" : {
+      "comment" : "Details panel section editor toggle (iPhone)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show Section"
+          }
+        }
+      }
+    },
+    "panel.settings.section.expandedByDefault" : {
+      "comment" : "Details panel chapters/related editor toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Expanded by Default"
+          }
+        }
+      }
+    },
+    "panel.settings.section.expandedByDefault.footer" : {
+      "comment" : "Details panel chapters/related editor footer",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Whether the section starts expanded when it appears below the video details. You can still collapse or expand it by tapping its header."
+          }
+        }
+      }
+    },
+    "panel.settings.sections.footer" : {
+      "comment" : "Details panel settings section footer (iPhone)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sections appear in this order below the video details. Sections without content hide automatically."
+          }
+        }
+      }
+    },
+    "panel.settings.sections.header" : {
+      "comment" : "Details panel settings section header (iPhone)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sections"
+          }
+        }
+      }
+    },
+    "panel.settings.showThumbnails" : {
+      "comment" : "Details panel page element toggle",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thumbnails"
+          }
+        }
+      }
+    },
+    "panel.settings.side" : {
+      "comment" : "Details panel side picker (iPad/macOS standard layout)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Panel Side"
+          }
+        }
+      }
+    },
+    "panel.side.left" : {
+      "comment" : "Details panel side option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Left"
+          }
+        }
+      }
+    },
+    "panel.side.right" : {
+      "comment" : "Details panel side option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Right"
+          }
+        }
+      }
+    },
+    "Pause" : {
+
     },
     "peertube.explore.added" : {
       "localizations" : {
@@ -7153,6 +8493,16 @@
         }
       }
     },
+    "pill.visibility.footer.toggle" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show the player pill in the details panel."
+          }
+        }
+      }
+    },
     "pill.visibility.header" : {
       "localizations" : {
         "en" : {
@@ -7202,6 +8552,30 @@
           }
         }
       }
+    },
+    "Play" : {
+
+    },
+    "Play ${link}" : {
+
+    },
+    "Play Next" : {
+
+    },
+    "Play or Pause" : {
+
+    },
+    "Play Video" : {
+
+    },
+    "Play/Pause" : {
+
+    },
+    "Playback Speed" : {
+
+    },
+    "Player Command" : {
+
     },
     "player.autoplay.cancel" : {
       "comment" : "Cancel autoplay button",
@@ -7354,34 +8728,12 @@
         }
       }
     },
-    "player.controls.quality" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Quality"
-          }
-        }
-      }
-    },
     "player.controls.settings" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Settings"
-          }
-        }
-      }
-    },
-    "player.controls.subtitles" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Subtitles"
           }
         }
       }
@@ -7628,17 +8980,6 @@
         }
       }
     },
-    "player.noDescription" : {
-      "comment" : "Shown when video has no description",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No description available"
-          }
-        }
-      }
-    },
     "player.notPlaying" : {
       "comment" : "Placeholder when no video is playing",
       "localizations" : {
@@ -7846,16 +9187,6 @@
         }
       }
     },
-    "player.retry.status %lld %lld" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "player.retry.status %1$lld %2$lld"
-          }
-        }
-      }
-    },
     "player.retry.tryResolution %@" : {
       "localizations" : {
         "en" : {
@@ -7867,6 +9198,7 @@
       }
     },
     "player.tab.comments" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7877,6 +9209,7 @@
       }
     },
     "player.tab.info" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -7919,28 +9252,6 @@
         }
       }
     },
-    "player.tvos.volumeDown" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Vol -"
-          }
-        }
-      }
-    },
-    "player.tvos.volumeUp" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Vol +"
-          }
-        }
-      }
-    },
     "playlist.addTo" : {
       "localizations" : {
         "en" : {
@@ -7979,6 +9290,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Are you sure you want to delete this playlist?"
+          }
+        }
+      }
+    },
+    "playlist.delete.confirm.named %@" : {
+      "comment" : "Delete playlist confirmation with the playlist name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Are you sure you want to delete \"%@\"?"
           }
         }
       }
@@ -8070,16 +9392,6 @@
         }
       }
     },
-    "playlist.empty.title" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Empty Playlist"
-          }
-        }
-      }
-    },
     "playlist.imported.title" : {
       "comment" : "Toast title when playlist is imported to library",
       "localizations" : {
@@ -8143,6 +9455,17 @@
         }
       }
     },
+    "playlist.notFound.openPlaylists" : {
+      "comment" : "tvOS button on the playlist-not-found screen that opens the Playlists list",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Playlists"
+          }
+        }
+      }
+    },
     "playlist.play" : {
       "comment" : "Play button in playlist toolbar menu",
       "localizations" : {
@@ -8150,6 +9473,182 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Play"
+          }
+        }
+      }
+    },
+    "playlist.privacy" : {
+      "comment" : "Playlist visibility picker label",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Visibility"
+          }
+        }
+      }
+    },
+    "playlist.privacy.footer" : {
+      "comment" : "Explains what the playlist visibility picker does",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Who can see this playlist on the server. The selection shown here is applied when you save."
+          }
+        }
+      }
+    },
+    "playlist.privacy.footer.edit" : {
+      "comment" : "Explains the playlist visibility picker when editing a playlist that already exists",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Who can see this playlist on the server. The server does not report this exactly, so it only changes if you pick a different one."
+          }
+        }
+      }
+    },
+    "playlist.privacy.private" : {
+      "comment" : "Playlist visibility: only the account owner",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Private"
+          }
+        }
+      }
+    },
+    "playlist.privacy.public" : {
+      "comment" : "Playlist visibility: anyone",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Public"
+          }
+        }
+      }
+    },
+    "playlist.privacy.unlisted" : {
+      "comment" : "Playlist visibility: anyone with the link",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unlisted"
+          }
+        }
+      }
+    },
+    "playlist.remote.add.error" : {
+      "comment" : "Adding a video to a server-side playlist failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not add the video"
+          }
+        }
+      }
+    },
+    "playlist.remote.create.error" : {
+      "comment" : "Creating a playlist on the server failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not create the playlist"
+          }
+        }
+      }
+    },
+    "playlist.remote.delete.confirm" : {
+      "comment" : "Delete server-side playlist confirmation",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete this playlist from your account?"
+          }
+        }
+      }
+    },
+    "playlist.remote.delete.confirm.named %@" : {
+      "comment" : "Delete server-side playlist confirmation with the playlist name",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete \"%@\" from your account?"
+          }
+        }
+      }
+    },
+    "playlist.remote.delete.error" : {
+      "comment" : "Deleting a playlist from the server failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not delete the playlist"
+          }
+        }
+      }
+    },
+    "playlist.remote.edit.error" : {
+      "comment" : "Saving changes to a server-side playlist failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not save the playlist"
+          }
+        }
+      }
+    },
+    "playlist.remote.entryMismatch.message" : {
+      "comment" : "Body of the toast shown when a playlist row moved before it could be removed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The list was refreshed — try removing the video again."
+          }
+        }
+      }
+    },
+    "playlist.remote.entryMismatch.title" : {
+      "comment" : "Title of the toast shown when a playlist row moved before it could be removed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Playlist changed on the server"
+          }
+        }
+      }
+    },
+    "playlist.remote.refresh.error" : {
+      "comment" : "Refetching a server-side playlist before editing it failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not load the latest playlist"
+          }
+        }
+      }
+    },
+    "playlist.remote.remove.error" : {
+      "comment" : "Removing a video from a server-side playlist failed",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not remove the video"
           }
         }
       }
@@ -8201,9 +9700,21 @@
     "playlist.videoCount %lld" : {
       "localizations" : {
         "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld videos"
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "1 video"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld videos"
+                }
+              }
+            }
           }
         }
       }
@@ -8213,10 +9724,35 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%lld videos • %@"
+            "value" : "%1$#@videoCount@ • %2$@"
+          },
+          "substitutions" : {
+            "videoCount" : {
+              "argNum" : 1,
+              "formatSpecifier" : "lld",
+              "variations" : {
+                "plural" : {
+                  "one" : {
+                    "stringUnit" : {
+                      "state" : "translated",
+                      "value" : "1 video"
+                    }
+                  },
+                  "other" : {
+                    "stringUnit" : {
+                      "state" : "translated",
+                      "value" : "%arg videos"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
+    },
+    "Playlists" : {
+
     },
     "playlists.empty.description" : {
       "comment" : "Description shown when user has no playlists",
@@ -8240,12 +9776,45 @@
         }
       }
     },
+    "playlists.remote.load.error" : {
+      "comment" : "Shown when an account's playlists could not be fetched",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not load playlists"
+          }
+        }
+      }
+    },
     "playlists.search.placeholder" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Search playlists"
+          }
+        }
+      }
+    },
+    "playlists.selector.empty.account" : {
+      "comment" : "Shown in the playlist picker when an account has no playlists",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No playlists on this account yet."
+          }
+        }
+      }
+    },
+    "playlists.selector.empty.local" : {
+      "comment" : "Shown in the playlist picker when there are no playlists on this device",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No playlists on this device yet."
           }
         }
       }
@@ -8261,6 +9830,9 @@
         }
       }
     },
+    "Plays a YouTube, PeerTube or direct media link in Yattee." : {
+
+    },
     "popular.title" : {
       "comment" : "Popular videos page title",
       "localizations" : {
@@ -8271,6 +9843,18 @@
           }
         }
       }
+    },
+    "Position" : {
+
+    },
+    "Previous" : {
+
+    },
+    "Previous Video" : {
+
+    },
+    "Queue Position" : {
+
     },
     "queue.action.addToQueue" : {
       "comment" : "Add to queue action in action sheet",
@@ -8763,6 +10347,9 @@
         }
       }
     },
+    "Resume" : {
+
+    },
     "resume.action.continueAt %@" : {
       "comment" : "Continue watching action with timestamp",
       "localizations" : {
@@ -8784,6 +10371,24 @@
           }
         }
       }
+    },
+    "Resumes, pauses, skips or closes what's playing in Yattee." : {
+
+    },
+    "Returns the title of what's playing in Yattee, or nothing when the player is closed." : {
+
+    },
+    "Saved Videos" : {
+
+    },
+    "Search For" : {
+
+    },
+    "Search Videos" : {
+
+    },
+    "Search Yattee for ${query}" : {
+
     },
     "search.bookmarks.placeholder" : {
       "localizations" : {
@@ -9234,6 +10839,36 @@
         }
       }
     },
+    "Searches for videos in Yattee." : {
+
+    },
+    "Seconds" : {
+
+    },
+    "Seconds from the start. Leave empty to use the link's own time." : {
+
+    },
+    "Section" : {
+
+    },
+    "Seek" : {
+
+    },
+    "Seek ${mode} ${seconds} seconds" : {
+
+    },
+    "Seek Mode" : {
+
+    },
+    "Set Playback Speed" : {
+
+    },
+    "Set playback speed to ${speed}" : {
+
+    },
+    "Settings" : {
+
+    },
     "settings.about.community" : {
       "localizations" : {
         "en" : {
@@ -9368,18 +11003,6 @@
         }
       }
     },
-    "settings.advanced.data.importLegacy" : {
-      "comment" : "Button label for importing legacy v1 data",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Import from Previous Version"
-          }
-        }
-      }
-    },
     "settings.advanced.data.noDuplicates" : {
       "comment" : "Alert message",
       "localizations" : {
@@ -9499,6 +11122,16 @@
         }
       }
     },
+    "settings.advanced.debug.buildDate" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Build Date"
+          }
+        }
+      }
+    },
     "settings.advanced.debug.buildNumber" : {
       "localizations" : {
         "en" : {
@@ -9559,6 +11192,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "OS Version"
+          }
+        }
+      }
+    },
+    "settings.advanced.debug.performanceLogging" : {
+      "comment" : "Toggle label for logging CPU, energy and activity every few seconds",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Performance Logging"
           }
         }
       }
@@ -9940,6 +11584,7 @@
       }
     },
     "settings.advanced.logs.export.copy" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -10889,7 +12534,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ask Every Time"
+            "value" : "Show Details"
           }
         }
       }
@@ -10930,6 +12575,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Open (Play)"
+          }
+        }
+      }
+    },
+    "settings.behavior.linkActionsWithoutConfirmation" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Run Link Actions Without Asking"
+          }
+        }
+      }
+    },
+    "settings.behavior.linkActionsWithoutConfirmation.footer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "yattee:// links can queue, bookmark, download and subscribe. Leave this off to confirm each one, since any website or app can open these links."
           }
         }
       }
@@ -11044,6 +12709,26 @@
         }
       }
     },
+    "settings.behavior.privacyFrontendSharing" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use Privacy Frontend URLs When Sharing"
+          }
+        }
+      }
+    },
+    "settings.behavior.privacyFrontendSharing.footer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Share links to YouTube videos point to the current source's watch page instead of youtube.com. Videos the current source can't open keep their original link."
+          }
+        }
+      }
+    },
     "settings.behavior.searchHistoryLimit" : {
       "comment" : "Label for search history limit picker",
       "localizations" : {
@@ -11084,6 +12769,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld queries"
+          }
+        }
+      }
+    },
+    "settings.behavior.sharing.header" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sharing"
           }
         }
       }
@@ -11989,7 +13684,6 @@
       }
     },
     "settings.icloud.dev.badge" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -12000,7 +13694,6 @@
       }
     },
     "settings.icloud.dev.footer" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -12011,7 +13704,6 @@
       }
     },
     "settings.icloud.dev.title" : {
-      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -12398,6 +14090,83 @@
         }
       }
     },
+    "settings.navigationStyle" : {
+      "comment" : "Picker label for choosing sidebar or tab bar navigation",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navigation"
+          }
+        }
+      }
+    },
+    "settings.navigationStyle.automatic" : {
+      "comment" : "Navigation style option: sidebar on large screens, tab bar elsewhere",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatic"
+          }
+        }
+      }
+    },
+    "settings.navigationStyle.confirm.change" : {
+      "comment" : "Confirm button for changing the navigation style",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Change"
+          }
+        }
+      }
+    },
+    "settings.navigationStyle.confirm.message" : {
+      "comment" : "Alert message before changing the navigation style",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The app's navigation will be rebuilt for the new layout. Settings will close and you'll return to Home."
+          }
+        }
+      }
+    },
+    "settings.navigationStyle.confirm.title" : {
+      "comment" : "Alert title before changing the navigation style",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Change Navigation?"
+          }
+        }
+      }
+    },
+    "settings.navigationStyle.footer" : {
+      "comment" : "Footer explaining the navigation style setting",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatic uses the sidebar when the screen is large enough. Tab Bar always uses the tab bar."
+          }
+        }
+      }
+    },
+    "settings.navigationStyle.tabBar" : {
+      "comment" : "Navigation style option: always use the tab bar",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tab Bar"
+          }
+        }
+      }
+    },
     "settings.notifications.defaultForNew" : {
       "comment" : "Toggle for enabling notifications on new subscriptions",
       "localizations" : {
@@ -12635,6 +14404,39 @@
         }
       }
     },
+    "settings.playback.foldable.header" : {
+      "comment" : "Header for foldable iPhone player settings section",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Foldable"
+          }
+        }
+      }
+    },
+    "settings.playback.foldable.tabletopReflection" : {
+      "comment" : "Toggle for mirroring the video as a reflection below the hinge in the tabletop layout",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reflection Below Video"
+          }
+        }
+      }
+    },
+    "settings.playback.foldable.tabletopReflection.footer" : {
+      "comment" : "Footer explaining the tabletop reflection option",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When the phone stands half-open like a laptop, the lower half shows a dim mirrored copy of the video."
+          }
+        }
+      }
+    },
     "settings.playback.macOS.autoResizePlayer" : {
       "comment" : "Toggle for automatically resizing player window to match video aspect ratio",
       "localizations" : {
@@ -12642,18 +14444,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Auto-resize player to match video"
-          }
-        }
-      }
-    },
-    "settings.playback.macOS.header" : {
-      "comment" : "macOS-specific playback settings section header",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "macOS"
           }
         }
       }
@@ -12770,18 +14560,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Enable Queue"
-          }
-        }
-      }
-    },
-    "settings.playback.queue.footer" : {
-      "comment" : "Queue section footer",
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Queue lets you add videos to play next. Persist queue keeps it across app restarts."
           }
         }
       }
@@ -13573,6 +15351,17 @@
         }
       }
     },
+    "settings.playerControls.detailsPanel" : {
+      "comment" : "Player controls settings row",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Details Panel"
+          }
+        }
+      }
+    },
     "settings.playerControls.duplicateToEdit" : {
       "localizations" : {
         "en" : {
@@ -14215,6 +16004,17 @@
         }
       }
     },
+    "settings.privacy.history.account.footer %@" : {
+      "comment" : "Footer telling the user watched videos are mirrored to the selected account's server history",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Watched videos are also recorded to the history of %@ on its server. Turning off Save Watch History, or using Incognito, stops both."
+          }
+        }
+      }
+    },
     "settings.privacy.incognito.footer" : {
       "localizations" : {
         "en" : {
@@ -14746,76 +16546,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Choose where your subscriptions are stored and managed."
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.label" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Subscription Account"
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.noAccounts.action" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Go to Instances"
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.noAccounts.message" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Subscriptions account required for local subscriptions"
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.noAccounts.title" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "No Accounts Available"
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.switch.action" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Switch"
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.switch.message" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Your subscription feed will be refreshed from the new account."
-          }
-        }
-      }
-    },
-    "settings.subscriptions.account.switch.title" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Switch Account?"
           }
         }
       }
@@ -15539,6 +17269,76 @@
         }
       }
     },
+    "settings.videoInfo.actions.footer" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toolbar keeps the primary action in the navigation bar and moves the remaining actions to the ⋯ menu."
+          }
+        }
+      }
+    },
+    "settings.videoInfo.actions.footer.macOS" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toolbar shows all actions in the window toolbar instead of buttons below the video."
+          }
+        }
+      }
+    },
+    "settings.videoInfo.actions.header" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Video Info"
+          }
+        }
+      }
+    },
+    "settings.videoInfo.actionsLayout" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Actions"
+          }
+        }
+      }
+    },
+    "settings.videoInfo.actionsLayout.buttons" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Buttons"
+          }
+        }
+      }
+    },
+    "settings.videoInfo.actionsLayout.toolbar" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toolbar"
+          }
+        }
+      }
+    },
+    "settings.videoInfo.primaryAction" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Primary Action"
+          }
+        }
+      }
+    },
     "settings.youtubeEnhancements.deArrow.footer" : {
       "localizations" : {
         "en" : {
@@ -15915,6 +17715,12 @@
         }
       }
     },
+    "Skip" : {
+
+    },
+    "Skip Video" : {
+
+    },
     "smb.protocol.auto" : {
       "comment" : "SMB protocol auto-negotiate option",
       "localizations" : {
@@ -16003,6 +17809,29 @@
         }
       }
     },
+    "sources.delete.accountsWarning %lld" : {
+      "comment" : "Lead-in to the accounts an instance deletion signs out, followed by their names",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "This also signs out and removes 1 account:"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "This also signs out and removes %lld accounts:"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "sources.delete.confirmation" : {
       "comment" : "Generic delete confirmation title",
       "localizations" : {
@@ -16069,6 +17898,17 @@
         }
       }
     },
+    "sources.disabled.footer" : {
+      "comment" : "Explains the disabled sources section in the Sources tab",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disabled sources are not browsed. Turn one back on to use it again."
+          }
+        }
+      }
+    },
     "sources.editSource" : {
       "comment" : "Title for edit source view",
       "localizations" : {
@@ -16098,6 +17938,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "No Sources"
+          }
+        }
+      }
+    },
+    "sources.enable" : {
+      "comment" : "Action that switches a disabled source back on",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enable"
           }
         }
       }
@@ -16263,6 +18114,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ffmpeg"
+          }
+        }
+      }
+    },
+    "sources.field.frontendURL" : {
+      "comment" : "Field label for optional Piped web frontend URL",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frontend URL"
           }
         }
       }
@@ -16505,6 +18367,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Select a folder from Files app to add to your sources."
+          }
+        }
+      }
+    },
+    "sources.footer.frontendURL" : {
+      "comment" : "Footer text explaining the optional Piped web frontend URL",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Optional. Piped often serves its web frontend from a different address than the API. When set, it is used for opening this instance in the browser and copying its link. Leave empty to use the API URL."
           }
         }
       }
@@ -16960,7 +18833,16 @@
       }
     },
     "sources.status.authFailed" : {
-
+      "comment" : "Status when authentication was rejected",
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auth Failed"
+          }
+        }
+      }
     },
     "sources.status.authRequired" : {
       "comment" : "Status when authentication is required",
@@ -17104,6 +18986,9 @@
           }
         }
       }
+    },
+    "Speed" : {
+
     },
     "sponsorBlock.category.filler" : {
       "comment" : "Filler segment category",
@@ -17325,6 +19210,12 @@
         }
       }
     },
+    "Start Time" : {
+
+    },
+    "Stop" : {
+
+    },
     "stream.adaptive" : {
       "localizations" : {
         "en" : {
@@ -17485,6 +19376,18 @@
         }
       }
     },
+    "Subscribe to ${link}" : {
+
+    },
+    "Subscribe to Channel" : {
+
+    },
+    "Subscribes to a channel from its link, in the account you're using in Yattee." : {
+
+    },
+    "Subscription Feed" : {
+
+    },
     "subscription.error.alreadySubscribed" : {
 
     },
@@ -17509,25 +19412,8 @@
     "subscription.error.providerNotAvailable" : {
 
     },
-    "subscriptions.account.invidious" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invidious Account"
-          }
-        }
-      }
-    },
-    "subscriptions.account.invidiousInstance %@" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Invidious (%@)"
-          }
-        }
-      }
+    "Subscriptions" : {
+
     },
     "subscriptions.account.local" : {
       "localizations" : {
@@ -17539,22 +19425,12 @@
         }
       }
     },
-    "subscriptions.account.piped" : {
+    "subscriptions.account.local.device" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Piped Account"
-          }
-        }
-      }
-    },
-    "subscriptions.account.pipedInstance %@" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Piped (%@)"
+            "value" : "Yattee (This Device)"
           }
         }
       }
@@ -17577,6 +19453,83 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "All Channels"
+          }
+        }
+      }
+    },
+    "subscriptions.banner.accountInactive" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This account is set to inactive. Showing local data."
+          }
+        }
+      }
+    },
+    "subscriptions.banner.checking" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Waiting for iCloud before your account can be used. Showing local data."
+          }
+        }
+      }
+    },
+    "subscriptions.banner.credentialMissing" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to this account on this device to see its data. Showing local data."
+          }
+        }
+      }
+    },
+    "subscriptions.banner.credentialRejected" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This account needs to be signed in again. Showing local data."
+          }
+        }
+      }
+    },
+    "subscriptions.banner.instanceDisabled" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This account's source is switched off. Showing local data."
+          }
+        }
+      }
+    },
+    "subscriptions.banner.instancePending" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This account's source has not arrived from iCloud yet. Showing local data."
+          }
+        }
+      }
+    },
+    "subscriptions.banner.unreachable" : {
+      "comment" : "Banner shown while the selected account cannot be used yet",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This account's server could not be reached. Showing local data."
           }
         }
       }
@@ -17641,6 +19594,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Feed"
+          }
+        }
+      }
+    },
+    "subscriptions.feedUnavailable.description" : {
+      "comment" : "Feed state while the selected account cannot be reached",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The feed will load again once this account is available."
+          }
+        }
+      }
+    },
+    "subscriptions.feedUnavailable.title" : {
+      "comment" : "Feed state while the selected account cannot be reached",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Feed Unavailable"
           }
         }
       }
@@ -17724,10 +19699,24 @@
 
     },
     "subscriptions.notAuthenticated.description" : {
-
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to this account to see its subscription feed."
+          }
+        }
+      }
     },
     "subscriptions.notAuthenticated.title" : {
-
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign In Required"
+          }
+        }
+      }
     },
     "subscriptions.noVideosFromChannel" : {
       "comment" : "Empty state title when no videos from selected channel",
@@ -18046,6 +20035,9 @@
         }
       }
     },
+    "To" : {
+
+    },
     "toast.download.completed.title" : {
       "localizations" : {
         "en" : {
@@ -18082,6 +20074,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Download Started"
+          }
+        }
+      }
+    },
+    "toast.player.hwdecFallback.subtitle" : {
+      "comment" : "Toast subtitle shown (only with Enable Logging on) when hardware video decoding stopped mid-playback",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Details were logged — please export logs and report it"
+          }
+        }
+      }
+    },
+    "toast.player.hwdecFallback.title" : {
+      "comment" : "Toast title shown (only with Enable Logging on) when hardware video decoding stopped mid-playback",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hardware Decoding Stopped"
           }
         }
       }
@@ -18159,6 +20173,9 @@
         }
       }
     },
+    "Toggle Playback" : {
+
+    },
     "trending.title" : {
       "comment" : "Trending view title",
       "localizations" : {
@@ -18169,6 +20186,18 @@
           }
         }
       }
+    },
+    "Unpause" : {
+
+    },
+    "Unsubscribe from ${link}" : {
+
+    },
+    "Unsubscribe from Channel" : {
+
+    },
+    "Unsubscribes from a channel, in the account you're using in Yattee." : {
+
     },
     "video.badge.live" : {
       "comment" : "Label for live streams",
@@ -18229,6 +20258,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Cancel Download"
+          }
+        }
+      }
+    },
+    "video.context.copyLink" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy Link"
           }
         }
       }
@@ -18411,10 +20450,19 @@
       }
     },
     "video.error.title" : {
-
+      "comment" : "Title shown when a video fails to load",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Failed to Load Video"
+          }
+        }
+      }
     },
     "video.navigation.next" : {
       "comment" : "Accessibility label for next video button",
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -18426,6 +20474,7 @@
     },
     "video.navigation.previous" : {
       "comment" : "Accessibility label for previous video button",
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -18750,6 +20799,36 @@
         }
       }
     },
+    "videoInfo.playTip.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap the thumbnail to start playing this video."
+          }
+        }
+      }
+    },
+    "videoInfo.playTip.messageWithSwipe" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap the thumbnail to start playing this video. Swipe it left or right to browse other videos from this list."
+          }
+        }
+      }
+    },
+    "videoInfo.playTip.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap to Play"
+          }
+        }
+      }
+    },
     "videoInfo.progress" : {
       "comment" : "Watch progress label",
       "localizations" : {
@@ -18849,6 +20928,16 @@
         }
       }
     },
+    "videoInfo.toolbar.moreActions" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "More Actions"
+          }
+        }
+      }
+    },
     "videoInfo.viewAllComments" : {
       "comment" : "View all comments button",
       "localizations" : {
@@ -18897,6 +20986,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Columns"
+          }
+        }
+      }
+    },
+    "viewOptions.hideShorts" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hide Shorts"
           }
         }
       }
@@ -19022,25 +21121,8 @@
         }
       }
     },
-    "wideLayoutPanel.alignmentButton.moveLeft" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Move Panel Left"
-          }
-        }
-      }
-    },
-    "wideLayoutPanel.alignmentButton.moveRight" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Move Panel Right"
-          }
-        }
-      }
+    "Watch History" : {
+
     },
     "wideLayoutPanel.pinButton.pin" : {
       "localizations" : {
@@ -19061,6 +21143,9 @@
           }
         }
       }
+    },
+    "Yattee can only open web links." : {
+
     }
   },
   "version" : "1.0"

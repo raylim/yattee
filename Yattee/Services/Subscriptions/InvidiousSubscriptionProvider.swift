@@ -15,12 +15,26 @@ import Foundation
 final class InvidiousSubscriptionProvider: SubscriptionProvider {
     // MARK: - Properties
 
-    let accountType: SubscriptionAccountType = .invidious
+    /// The account this provider is bound to. One provider per account, so two
+    /// logins on the same instance never share a subscription cache.
+    let account: Account
 
     private let invidiousAPI: InvidiousAPI
     private let credentialsManager: InvidiousCredentialsManager
-    private let instancesManager: InstancesManager
-    private let settingsManager: SettingsManager
+    private let accountsManager: AccountsManager
+
+    /// Records the outcome of a server call against the account. The
+    /// classification lives in one place so the feed cache, which talks to the
+    /// same servers without going through a provider, reaches the same verdict.
+    private func recordOutcome(_ error: Error?, credential: String) {
+        // Only for the secret the request actually used. Signing in again — or
+        // a switch of Apple account — replaces it under the same key while a
+        // request is still out, and a late 401 would otherwise reject the
+        // replacement, or a late success clear a rejection it never earned.
+        guard credentialsManager.credential(for: account) == credential else { return }
+
+        accountsManager.recordServerOutcome(error, for: account)
+    }
 
     /// In-memory cache of subscribed channel IDs for fast lookup.
     private var cachedChannelIDs: Set<String> = []
@@ -35,15 +49,16 @@ final class InvidiousSubscriptionProvider: SubscriptionProvider {
     // MARK: - Initialization
 
     init(
+        account: Account,
         invidiousAPI: InvidiousAPI,
         credentialsManager: InvidiousCredentialsManager,
-        instancesManager: InstancesManager,
+        accountsManager: AccountsManager,
         settingsManager: SettingsManager
     ) {
+        self.account = account
         self.invidiousAPI = invidiousAPI
         self.credentialsManager = credentialsManager
-        self.instancesManager = instancesManager
-        self.settingsManager = settingsManager
+        self.accountsManager = accountsManager
     }
 
     // MARK: - SubscriptionProvider
@@ -53,7 +68,9 @@ final class InvidiousSubscriptionProvider: SubscriptionProvider {
         let (instance, sid) = try await getAuthenticatedInstance()
         
         // Fetch subscriptions from Invidious
-        let subscriptions = try await invidiousAPI.subscriptions(instance: instance, sid: sid)
+        let subscriptions = try await tracking(credential: sid) {
+            try await invidiousAPI.subscriptions(instance: instance, sid: sid)
+        }
         
         // Update in-memory cache
         cachedChannelIDs = Set(subscriptions.map(\.authorId))
@@ -71,7 +88,9 @@ final class InvidiousSubscriptionProvider: SubscriptionProvider {
         let (instance, sid) = try await getAuthenticatedInstance()
         
         // Subscribe on Invidious server
-        try await invidiousAPI.subscribe(to: channel.id.channelID, instance: instance, sid: sid)
+        try await tracking(credential: sid) {
+            try await invidiousAPI.subscribe(to: channel.id.channelID, instance: instance, sid: sid)
+        }
         
         // Update in-memory cache only
         cachedChannelIDs.insert(channel.id.channelID)
@@ -87,8 +106,12 @@ final class InvidiousSubscriptionProvider: SubscriptionProvider {
         invalidateCacheIfAccountChanged()
         let (instance, sid) = try await getAuthenticatedInstance()
         
-        // Unsubscribe on Invidious server
-        try await invidiousAPI.unsubscribe(from: channelID, instance: instance, sid: sid)
+        // Unsubscribe on Invidious server. Tracked like every other
+        // authenticated call: a rejected credential noticed here must mark the
+        // account, or it keeps reporting itself as signed in.
+        try await tracking(credential: sid) {
+            try await invidiousAPI.unsubscribe(from: channelID, instance: instance, sid: sid)
+        }
         
         // Update in-memory cache only
         cachedChannelIDs.remove(channelID)
@@ -122,6 +145,10 @@ final class InvidiousSubscriptionProvider: SubscriptionProvider {
         return cachePopulated ? cachedChannels.count : nil
     }
 
+    var cachedSubscriptions: [Channel]? {
+        cachePopulated ? cachedChannels : nil
+    }
+
     // MARK: - Private Helpers
 
     private func invalidateCacheIfAccountChanged() {
@@ -134,25 +161,27 @@ final class InvidiousSubscriptionProvider: SubscriptionProvider {
     }
 
     /// Gets the authenticated Invidious instance and session ID from account settings.
-    private func getAuthenticatedInstance() async throws -> (Instance, String) {
-        // Get the instance ID from subscription account settings
-        let account = settingsManager.subscriptionAccount
-
-        let instance: Instance?
-        if let instanceID = account.instanceID {
-            // Use the specific instance from account settings
-            instance = instancesManager.instances.first { $0.id == instanceID && $0.isEnabled }
-        } else {
-            // Fallback to first enabled Invidious instance
-            instance = instancesManager.instances.first { $0.type == .invidious && $0.isEnabled }
+    /// Runs a server call and records what it implies about the credential.
+    private func tracking<T>(credential: String, _ operation: () async throws -> T) async rethrows -> T {
+        do {
+            let value = try await operation()
+            recordOutcome(nil, credential: credential)
+            return value
+        } catch {
+            recordOutcome(error, credential: credential)
+            throw error
         }
+    }
 
-        guard let instance else {
+    private func getAuthenticatedInstance() async throws -> (Instance, String) {
+        // The account names its instance directly - no falling back to
+        // "some enabled Invidious instance", which could silently send one
+        // account's request to a server it has no credential for.
+        guard let instance = accountsManager.instance(for: account), instance.isEnabled else {
             throw SubscriptionProviderError.instanceNotConfigured
         }
 
-        // Get session ID
-        guard let sid = credentialsManager.sid(for: instance) else {
+        guard let sid = credentialsManager.credential(for: account) else {
             throw SubscriptionProviderError.notAuthenticated
         }
 

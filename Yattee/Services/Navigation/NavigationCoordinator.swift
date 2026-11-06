@@ -7,73 +7,78 @@
 
 import SwiftUI
 
-/// Sheet destinations for modal presentation.
-enum SheetDestination: Identifiable {
-    case settings
-    case addToPlaylist(Video)
-    case downloadOptions(Video)
-    case newPlaylist
-
-    var id: String {
-        switch self {
-        case .settings: return "settings"
-        case .addToPlaylist(let video): return "addToPlaylist-\(video.id.id)"
-        case .downloadOptions(let video): return "downloadOptions-\(video.id.id)"
-        case .newPlaylist: return "newPlaylist"
-        }
-    }
-}
-
 /// Centralized navigation coordinator for the app.
 @Observable
 @MainActor
 final class NavigationCoordinator {
-    /// Navigation path for NavigationStack.
-    var path = NavigationPath()
+    /// Selected section and per-section stacks, shared by every layout.
+    let router = NavigationRouter()
 
-    /// Currently selected tab.
-    var selectedTab: AppTab = .home {
-        didSet {
-            updateHandoffForCurrentTab()
+    /// Shared sheets requested from outside the view tree.
+    let presenter = PresentationRouter()
+
+    init() {
+        router.onSelectionChange = { [weak self] _ in
+            self?.updateHandoffForCurrentTab()
         }
     }
-
-    /// Directly selected sidebar item (for extended navigation commands).
-    /// When set, UnifiedTabView syncs this to its selection state.
-    var selectedSidebarItem: SidebarItem?
 
     /// Currently selected home sub-tab.
     var selectedHomeTab: HomeTab = .playlists {
         didSet {
-            if selectedTab == .home {
+            if router.selection == .home {
                 updateHandoffForCurrentTab()
             }
         }
     }
 
-    /// Currently presented sheet.
-    var presentedSheet: SheetDestination?
+    /// Bumped when navigation arriving from outside the app (a notification,
+    /// a deep link, Handoff) needs the main window's sheets out of the way.
+    /// Sheets observe it via `.dismissesOnExternalNavigation(_:)`.
+    var dismissPresentationsGeneration = 0
 
-    /// Trigger to dismiss settings sheet (incremented when dismiss is needed).
-    var dismissSettingsTrigger = 0
-
-    /// Mini player video (if playing).
-    var nowPlaying: Video?
+    #if os(macOS)
+    /// Bumped to ask the main window to open the Settings window, which only a
+    /// view can do (`openWindow`).
+    var openSettingsWindowRequest = 0
+    #endif
 
     /// Whether the mini player is expanded to full screen.
-    var isPlayerExpanded = false
+    var isPlayerExpanded = false {
+        didSet {
+            // Each expanded player session applies the preset's default panel
+            // visibility once; closing the player arms the next application.
+            if !isPlayerExpanded {
+                hasAppliedPanelDefaultVisibility = false
+                isCornerLayoutActive = false
+                cornerLayoutFits = false
+                isWideScreenLayoutActive = false
+            }
+        }
+    }
 
-    /// Whether the mini player queue sheet is showing.
-    var isMiniPlayerQueueSheetPresented = false
+    /// Whether the current expanded player session already applied the active
+    /// preset's default details panel visibility. Lives here (not view @State)
+    /// so window-mode switches and layout re-mounts don't re-apply it.
+    var hasAppliedPanelDefaultVisibility = false
 
-    /// Video to present in the queue action sheet (e.g. a video link tapped inside
-    /// a description). Set by the deep-link handler; cleared when the sheet dismisses.
-    /// Presented by YatteeApp when the player is collapsed and by ExpandedPlayerSheet
-    /// when the player is expanded, so the sheet always sits above the visible layer.
-    var descriptionLinkQueueSheetVideo: Video?
+    /// Whether the expanded player currently resolves to the corner layout
+    /// (iPad/macOS). Drives macOS window aspect-lock gating, which lives in a
+    /// different view than the layout resolver.
+    var isCornerLayoutActive = false
+
+    /// Whether the expanded player's current size fits the corner layout,
+    /// regardless of the preset's layout mode. Lets the async preset load
+    /// resolve the landscape panel default for the screen actually in use.
+    var cornerLayoutFits = false
+
+    /// Whether the expanded player currently resolves to the widescreen
+    /// (landscape) layout. Set from the sheet's layout pass so non-view code
+    /// (remote control state) reads the real layout instead of screen bounds.
+    var isWideScreenLayoutActive = false
 
     /// Resolved short-link URL awaiting user confirmation ("Try in Yattee" vs
-    /// "Open in Browser"). Dual-hosted like `descriptionLinkQueueSheetVideo`
+    /// "Open in Browser"). Dual-hosted (root and expanded player)
     /// so the dialog is visible whether or not the expanded player is covering
     /// the main app view.
     var resolvedShortLinkPrompt: URL?
@@ -81,9 +86,6 @@ final class NavigationCoordinator {
     /// Candidate URL that isn't confidently a video (loose `.externalVideo`
     /// match) awaiting user confirmation before yt-dlp extraction. Dual-hosted.
     var ambiguousExternalLinkPrompt: URL?
-
-    /// Whether the mini player playlist sheet is showing.
-    var isMiniPlayerPlaylistSheetPresented = false
 
     /// Counter that increments each time the player should expand.
     /// Used to trigger presentation even when isPlayerExpanded is already true.
@@ -139,11 +141,49 @@ final class NavigationCoordinator {
     /// Portrait panel frame in screen coordinates (for gesture conflict resolution).
     var portraitPanelFrame: CGRect = .zero
 
+    /// Corner layout below-video panel frame in screen coordinates — touches
+    /// inside it must not start the sheet dismiss pan (drag handle conflict).
+    var cornerBelowPanelFrame: CGRect = .zero
+
+    /// Corner layout video region frame in screen coordinates — the pinch
+    /// panscan gesture only begins inside it while the panels are showing.
+    var cornerVideoFrame: CGRect = .zero
+
+    /// Panel resize grabber strip frame in screen coordinates — touches inside
+    /// it must not start the sheet dismiss pan (a diagonal resize drag would
+    /// otherwise be cancelled and dismiss the player instead).
+    var panelResizeGrabberFrame: CGRect = .zero
+
+    /// Volume/brightness side slider frames in screen coordinates, keyed by
+    /// edge (leading = true). Touches inside must not start the sheet dismiss
+    /// pan — the window pan recognizes before SwiftUI's slider DragGesture
+    /// sets `isAdjustingPlayerSliders`, so the flag alone loses the race.
+    var playerSideSliderFrames: [Bool: CGRect] = [:]
+
+    /// Corner layout: width of the trailing screen-edge strip reserved for
+    /// the side column reveal swipe while the column is collapsed (0 when
+    /// not collapsed) — the seek pan must not begin from inside it.
+    var cornerSideColumnEdgeRevealInset: CGFloat = 0
+
+    /// Corner layout panel toggle requested from outside the layout (menu
+    /// bar keyboard shortcuts). Each request carries its own id so repeating
+    /// the same shortcut fires again.
+    var cornerPanelToggleRequest: CornerPanelToggleRequest?
+
     /// Progress bar frame in screen coordinates (for gesture conflict resolution).
     var progressBarFrame: CGRect = .zero
 
     /// Comments overlay frame in screen coordinates (for gesture conflict resolution).
     var commentsFrame: CGRect = .zero
+
+    /// Mini player video preview frame in the main window's coordinates and its
+    /// corner radius — the target the expanded player morphs into on dismiss.
+    var miniPlayerVideoFrame: CGRect = .zero
+    var miniPlayerVideoCornerRadius: CGFloat = 0
+
+    /// Whether the expanded player is morphing into the mini player. The mini
+    /// player keeps its thumbnail hidden so the arriving video isn't covered.
+    var isPlayerMorphingToMini = false
 
     /// Current panscan value from UIKit pinch gesture (0.0 = fit, 1.0 = fill).
     /// Updated by ExpandedPlayerWindow's pinch gesture handler.
@@ -205,14 +245,16 @@ final class NavigationCoordinator {
         }
     }
 
-    /// Pending navigation destination (used when navigating from sheets/modals).
-    var pendingNavigation: NavigationDestination?
-
     /// Reference to HandoffManager for updating activities on navigation.
     private weak var handoffManager: HandoffManager?
 
     /// Reference to MediaSourcesManager for navigating to media source directories.
     private weak var mediaSourcesManager: MediaSourcesManager?
+
+    #if os(macOS)
+    /// Reference to SettingsManager for the player window mode.
+    private weak var settingsManager: SettingsManager?
+    #endif
 
     // MARK: - Handoff Integration
 
@@ -226,40 +268,46 @@ final class NavigationCoordinator {
         self.mediaSourcesManager = manager
     }
 
+    #if os(macOS)
+    /// Set the SettingsManager reference for the player window mode.
+    func setSettingsManager(_ manager: SettingsManager) {
+        self.settingsManager = manager
+    }
+    #endif
+
     // MARK: - Navigation Actions
 
-    /// Navigate to a destination.
+    /// Navigate to a destination by pushing it onto the selected section's stack.
     func navigate(to destination: NavigationDestination) {
-        pendingNavigation = destination
+        // Settings has its own navigation stack, so it can't be pushed onto a
+        // section's stack: it is a section, a sheet, or a window instead.
+        if case .settings = destination {
+            openSettings()
+            return
+        }
+        router.push(destination)
         handoffManager?.updateActivity(for: destination)
     }
 
-    /// Clear pending navigation after it's been handled.
-    func clearPendingNavigation() {
-        pendingNavigation = nil
-    }
-
-    /// Pop to the root of the current navigation stack.
-    func popToRoot() {
-        path.removeLast(path.count)
-    }
-
-    /// Pop one level back in the navigation stack.
-    func pop() {
-        guard !path.isEmpty else { return }
-        path.removeLast()
+    /// Shows Settings the way the current layout presents it: the Settings
+    /// section where the layout has one, otherwise the Home screen's sheet
+    /// (`NavigationRouter.ensureSelectionIsAvailable`), or on macOS its window.
+    func openSettings() {
+        #if os(macOS)
+        openSettingsWindowRequest += 1
+        #else
+        router.select(.settings)
+        #endif
     }
 
     // MARK: - Sheet Presentation
 
-    /// Dismiss the current sheet.
-    func dismissSheet() {
-        presentedSheet = nil
-    }
-
-    /// Dismiss the settings sheet from anywhere in the app.
-    func dismissSettings() {
-        dismissSettingsTrigger += 1
+    /// Dismiss the main window's sheets so external navigation lands on a
+    /// visible screen instead of changing tabs underneath a sheet. Call it
+    /// only from external entry points: in-app navigation and layout swaps
+    /// must keep an open sheet.
+    func dismissPresentations() {
+        dismissPresentationsGeneration += 1
     }
 
     // MARK: - Player Actions
@@ -282,41 +330,32 @@ final class NavigationCoordinator {
         }
     }
 
-    /// Scrolls the player into view (uncovered position).
-    func scrollPlayerIntoView() {
-        isPlayerScrollAnimating = true
-        scrollPlayerIntoViewTrigger += 1
-    }
-
-    /// Waits until player scroll animation completes.
-    func waitForPlayerScrollAnimation() async {
-        while isPlayerScrollAnimating {
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-    }
-
-    // MARK: - URL Handling
-
-    /// Handle an incoming URL.
-    func handle(url: URL) {
-        let router = URLRouter()
-        if let destination = router.route(url) {
-            navigate(to: destination)
-        }
-    }
-
     // MARK: - Convenience Navigation
 
     /// Navigate to the subscriptions tab/feed.
-    func navigateToSubscriptions() {
-        selectedTab = .subscriptions
+    func navigateToSubscriptions(collapsePlayer: Bool = false) {
+        if collapsePlayer, isPlayerExpanded {
+            isPlayerCollapsing = true
+            isPlayerExpanded = false
+        }
+        router.select(.subscriptionsFeed)
     }
 
-    /// Navigate to a video by its ID string.
-    /// Creates a VideoID assuming YouTube source.
-    func navigateToVideo(videoID: String) {
-        let id = VideoID(source: .global(provider: ContentSource.youtubeProvider), videoID: videoID)
-        navigate(to: .video(.id(id)))
+    /// Navigate to an opened link's screen, collapsing the full-screen player
+    /// so the pushed screen is visible instead of landing underneath it.
+    /// A macOS player in its own window doesn't cover the main window, so it
+    /// stays open.
+    func navigateToOpenedLink(_ destination: NavigationDestination) {
+        #if os(macOS)
+        let coversMainWindow = settingsManager?.macPlayerSeparateWindow != true
+        #else
+        let coversMainWindow = true
+        #endif
+        if isPlayerExpanded, coversMainWindow {
+            isPlayerCollapsing = true
+            isPlayerExpanded = false
+        }
+        navigate(to: destination)
     }
 
     /// Navigate to a video's channel/source.
@@ -346,13 +385,11 @@ final class NavigationCoordinator {
 
     // MARK: - Handoff Updates
 
-    /// Updates Handoff activity based on current tab selection.
+    /// Updates Handoff activity based on the selected section.
     private func updateHandoffForCurrentTab() {
         let destination: NavigationDestination?
 
-        switch selectedTab {
-        case .subscriptions:
-            destination = .subscriptionsFeed
+        switch router.selection {
         case .home:
             switch selectedHomeTab {
             case .playlists:
@@ -365,14 +402,29 @@ final class NavigationCoordinator {
         case .search:
             // Search updates handoff when a search is performed, not on tab selection
             destination = nil
-        #if os(tvOS)
-        case .settings:
+        case .mediaSource, .instance, .sources:
             destination = nil
-        #endif
+        default:
+            destination = router.selection.navigationDestination()
         }
 
         if let destination {
             handoffManager?.updateActivity(for: destination)
         }
     }
+}
+
+/// Corner layout regions a panel toggle request targets.
+enum CornerPanelToggle: Equatable {
+    /// The info panel below the video (with the comments pill on iOS).
+    case belowVideo
+    /// The tabbed side column on the trailing edge.
+    case sideColumn
+    /// Every region at once — same as the in-player panel toggle button.
+    case all
+}
+
+struct CornerPanelToggleRequest: Equatable {
+    let target: CornerPanelToggle
+    let id = UUID()
 }

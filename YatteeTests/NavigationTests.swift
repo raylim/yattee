@@ -178,6 +178,78 @@ struct URLRouterTests {
         #expect(router.unwrapped(scheme) == scheme)
     }
 
+    @Test("route() unwraps yattee://open itself, keeping inner query items")
+    func routeUnwrapsOpenWrapper() {
+        let wrapper = URL(string: "yattee://open?url=https://www.youtube.com/watch?list=PLtest123&index=2")!
+        if case .playlist(.remote(let id, _, _, _)) = router.route(wrapper) {
+            #expect(id.playlistID == "PLtest123")
+        } else {
+            Issue.record("Expected playlist destination")
+        }
+    }
+
+    @Test("yattee://open with no inner URL routes nowhere")
+    func emptyOpenWrapper() {
+        #expect(router.route(URL(string: "yattee://open")!) == nil)
+        #expect(router.route(URL(string: "yattee://open?url=")!) == nil)
+    }
+
+    // MARK: - Local File Rejection
+
+    @Test("File URLs never route, directly or wrapped")
+    func fileURLsRejected() {
+        #expect(router.route(URL(string: "file:///private/var/mobile/movie.mp4")!) == nil)
+        #expect(router.route(URL(string: "yattee://open?url=file:///private/var/mobile/movie.mp4")!) == nil)
+    }
+
+    @Test("Remote direct media still routes")
+    func remoteDirectMedia() {
+        let url = URL(string: "https://example.com/video.mp4")!
+        if case .directMedia(let media) = router.route(url) {
+            #expect(media == url)
+        } else {
+            Issue.record("Expected directMedia destination")
+        }
+    }
+
+    // MARK: - Legacy (1.x) Scheme Tests
+
+    @Test("Legacy yattee:// links route like their web equivalents", arguments: [
+        "yattee://watch?v=dQw4w9WgXcQ",
+        "yattee://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "yattee://youtube.com/watch?v=dQw4w9WgXcQ&t=30",
+        "yattee://youtu.be/dQw4w9WgXcQ",
+        "yattee://https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "yattee://shorts/dQw4w9WgXcQ",
+    ])
+    func legacyVideoLinks(_ string: String) {
+        if case .video(let source, _) = router.route(URL(string: string)!), case .id(let videoID) = source {
+            #expect(videoID.videoID == "dQw4w9WgXcQ")
+        } else {
+            Issue.record("Expected video destination for \(string)")
+        }
+    }
+
+    @Test("Legacy playlist and channel links")
+    func legacyPlaylistAndChannel() {
+        if case .playlist(.remote(let id, _, _, _)) = router.route(URL(string: "yattee://playlist?list=PLtest123")!) {
+            #expect(id.playlistID == "PLtest123")
+        } else {
+            Issue.record("Expected playlist destination")
+        }
+        if case .channel(let id, _) = router.route(URL(string: "yattee://www.youtube.com/@somehandle")!) {
+            #expect(id == "@somehandle")
+        } else {
+            Issue.record("Expected channel destination")
+        }
+    }
+
+    @Test("Unknown yattee:// hosts still route nowhere")
+    func unknownCustomHost() {
+        #expect(router.route(URL(string: "yattee://nonsense")!) == nil)
+        #expect(router.route(URL(string: "yattee://example.com/page")!) == nil)
+    }
+
     // MARK: - PeerTube URL Tests
 
     @Test("Parse PeerTube /w/ video URL")
@@ -254,16 +326,59 @@ struct URLRouterTests {
         }
     }
 
-    @Test("YouTube URL without video ID routes to external video")
+    @Test("YouTube watch URL without video ID routes nowhere")
     func urlWithoutVideoID() {
         let url = URL(string: "https://www.youtube.com/watch")!
-        let destination = router.route(url)
-        // YouTube URLs without video ID are now treated as potential external videos
-        if case .externalVideo(let extractedURL) = destination {
-            #expect(extractedURL == url)
-        } else {
-            Issue.record("Expected externalVideo destination")
-        }
+        #expect(router.route(url) == nil)
+    }
+
+    @Test("YouTube pages without a video route nowhere instead of to yt-dlp", arguments: [
+        "https://www.youtube.com/",
+        "https://youtube.com",
+        "https://www.youtube.com/feed/subscriptions",
+        "https://www.youtube.com/hashtag/music",
+        "https://www.youtube.com/results",
+        "https://music.youtube.com/browse/MPREb_abc",
+    ])
+    func youTubeNonVideoPages(_ string: String) {
+        #expect(router.route(URL(string: string)!) == nil)
+    }
+
+    @Test("Other unparsed YouTube links still go to yt-dlp")
+    func youTubeClipGoesToExtraction() {
+        let url = URL(string: "https://www.youtube.com/clip/UgkxABC")!
+        #expect(router.route(url) == .externalVideo(url))
+    }
+
+    @Test("YouTube search results link routes to search")
+    func youTubeSearchLink() {
+        let url = URL(string: "https://www.youtube.com/results?search_query=swift+concurrency")!
+        #expect(router.route(url) == .search("swift concurrency"))
+    }
+
+    @Test("youtube-nocookie embed routes to video")
+    func youTubeNoCookieEmbed() {
+        let url = URL(string: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30")!
+        #expect(router.route(url) == .video(.id(.global("dQw4w9WgXcQ"))))
+    }
+
+    @Test("Look-alike hosts are not YouTube")
+    func lookAlikeHosts() {
+        let url = URL(string: "https://notyoutube.com/watch?v=dQw4w9WgXcQ")!
+        #expect(router.route(url) == .externalVideo(url))
+        #expect(!router.isYouTubeHost("youtube.com.evil.example"))
+        #expect(router.isYouTubeHost("music.youtube.com"))
+    }
+
+    @Test("Watch link playlist context", arguments: [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtest123", "PLtest123"),
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ", nil),
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=WL", nil),
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", nil),
+        ("https://www.youtube.com/playlist?list=PLtest123", nil),
+    ] as [(String, String?)])
+    func playlistContext(_ string: String, _ expected: String?) {
+        #expect(router.youTubePlaylistContext(URL(string: string)!) == expected)
     }
 
     @Test("Known non-PeerTube hosts route to external video")
@@ -351,7 +466,7 @@ struct URLRouterTests {
         let url = URL(string: "https://www.youtube.com/playlist?list=PLtest123")!
         let destination = router.route(url)
 
-        if case .playlist(.remote(let playlistID, _, _)) = destination {
+        if case .playlist(.remote(let playlistID, _, _, _)) = destination {
             #expect(playlistID.playlistID == "PLtest123")
             if case .global = playlistID.source {
                 // Expected
@@ -434,7 +549,7 @@ struct URLRouterTests {
         let url = URL(string: "yattee://playlist/PLtest123")!
         let destination = router.route(url)
 
-        if case .playlist(.remote(let playlistID, _, _)) = destination {
+        if case .playlist(.remote(let playlistID, _, _, _)) = destination {
             #expect(playlistID.playlistID == "PLtest123")
         } else {
             Issue.record("Expected playlist destination")
@@ -511,6 +626,32 @@ struct URLRouterTests {
             }
         } else {
             Issue.record("Expected channel destination with federated source")
+        }
+    }
+
+    @Test("Parse yattee:// playlist URL with PeerTube source")
+    func customSchemePeerTubePlaylist() {
+        let url = URL(string: "yattee://playlist/abc123?source=peertube&instance=https://peertube.social")!
+        if case .playlist(.remote(let id, _, _, _)) = router.route(url),
+           case .federated(_, let instance) = id.source {
+            #expect(id.playlistID == "abc123")
+            #expect(instance.host == "peertube.social")
+        } else {
+            Issue.record("Expected federated playlist destination")
+        }
+    }
+
+    @Test("PeerTube playlist web URLs route to playlists, not videos", arguments: [
+        "https://framatube.org/w/p/abc123",
+        "https://framatube.org/video-playlists/abc123",
+    ])
+    func peertubePlaylistURLs(_ string: String) {
+        if case .playlist(.remote(let id, _, _, _)) = router.route(URL(string: string)!),
+           case .federated(_, let instance) = id.source {
+            #expect(id.playlistID == "abc123")
+            #expect(instance.host == "framatube.org")
+        } else {
+            Issue.record("Expected federated playlist destination for \(string)")
         }
     }
 
@@ -603,22 +744,21 @@ struct NavigationCoordinatorTests {
     func initialState() {
         let coordinator = NavigationCoordinator()
 
-        #expect(coordinator.selectedTab == .home)
-        #expect(coordinator.path.isEmpty)
-        #expect(coordinator.presentedSheet == nil)
+        #expect(coordinator.router.selection == .home)
+        #expect(coordinator.router.stack(for: .home).isEmpty)
     }
 
-    @Test("Navigate to destination sets pending navigation")
+    @Test("Navigate pushes onto the selected section's stack")
     func navigateToDestination() {
         let coordinator = NavigationCoordinator()
         let destination = NavigationDestination.video(.id(.global("test123")))
 
         coordinator.navigate(to: destination)
 
-        #expect(coordinator.pendingNavigation == destination)
+        #expect(coordinator.router.stack(for: .home) == [destination])
     }
 
-    @Test("Multiple navigations update pending navigation")
+    @Test("Multiple navigations stack in order")
     func multipleNavigations() {
         let coordinator = NavigationCoordinator()
 
@@ -626,78 +766,147 @@ struct NavigationCoordinatorTests {
         coordinator.navigate(to: .video(.id(.global("2"))))
         coordinator.navigate(to: .video(.id(.global("3"))))
 
-        // Only the last navigation is pending
-        #expect(coordinator.pendingNavigation == .video(.id(.global("3"))))
+        #expect(coordinator.router.stack(for: .home) == [
+            .video(.id(.global("1"))),
+            .video(.id(.global("2"))),
+            .video(.id(.global("3"))),
+        ])
     }
 
-    @Test("Pop to root clears path")
+    @Test("Each section keeps its own stack")
+    func perSectionStacks() {
+        let coordinator = NavigationCoordinator()
+
+        coordinator.navigate(to: .video(.id(.global("1"))))
+        coordinator.router.select(.search)
+        coordinator.navigate(to: .video(.id(.global("2"))))
+
+        #expect(coordinator.router.stack(for: .home) == [.video(.id(.global("1")))])
+        #expect(coordinator.router.stack(for: .search) == [.video(.id(.global("2")))])
+    }
+
+    @Test("Pop to root clears the selected stack only")
     func popToRoot() {
         let coordinator = NavigationCoordinator()
+        coordinator.navigate(to: .video(.id(.global("1"))))
+        coordinator.router.select(.search)
+        coordinator.navigate(to: .video(.id(.global("2"))))
 
-        // Manually add to path to test popToRoot
-        coordinator.path.append(NavigationDestination.video(.id(.global("1"))))
-        coordinator.path.append(NavigationDestination.video(.id(.global("2"))))
-        coordinator.path.append(NavigationDestination.video(.id(.global("3"))))
+        coordinator.router.popToRoot()
 
-        #expect(coordinator.path.count == 3)
-
-        coordinator.popToRoot()
-
-        #expect(coordinator.path.isEmpty)
+        #expect(coordinator.router.stack(for: .search).isEmpty)
+        #expect(coordinator.router.stack(for: .home).count == 1)
     }
 
-    @Test("Pop removes one level")
-    func pop() {
+    @Test("Navigate to subscriptions selects the feed")
+    func navigateToSubscriptions() {
         let coordinator = NavigationCoordinator()
 
-        // Manually add to path to test pop
-        coordinator.path.append(NavigationDestination.video(.id(.global("1"))))
-        coordinator.path.append(NavigationDestination.video(.id(.global("2"))))
+        coordinator.navigateToSubscriptions()
 
-        #expect(coordinator.path.count == 2)
-
-        coordinator.pop()
-
-        #expect(coordinator.path.count == 1)
+        #expect(coordinator.router.selection == .subscriptionsFeed)
     }
 
-    @Test("Pop on empty path is safe")
-    func popOnEmptyPath() {
-        let coordinator = NavigationCoordinator()
+    @Test("Startup tab applies only once")
+    func startupTabOnce() {
+        let router = NavigationRouter()
 
-        // Should not crash
-        coordinator.pop()
+        router.applyStartupTabIfNeeded(.search)
+        router.select(.bookmarks)
+        router.applyStartupTabIfNeeded(.search)
 
-        #expect(coordinator.path.isEmpty)
+        #expect(router.selection == .bookmarks)
     }
 
-    @Test("Switch tab")
-    func switchTab() {
-        let coordinator = NavigationCoordinator()
+    @Test("A stack that is no longer selected can't clear itself")
+    func offscreenStackWriteIgnored() {
+        let router = NavigationRouter()
+        router.push(.history)
+        let homePath = router.path(for: .home)
 
-        coordinator.selectedTab = .search
+        router.select(.bookmarks)
+        homePath.wrappedValue = []
 
-        #expect(coordinator.selectedTab == .search)
+        #expect(router.stack(for: .home) == [.history])
     }
 
-    @Test("Handle URL sets pending navigation")
-    func handleURL() {
-        let coordinator = NavigationCoordinator()
-        let url = URL(string: "https://youtube.com/watch?v=test123")!
+    @Test("The selected stack still pops")
+    func selectedStackPops() {
+        let router = NavigationRouter()
+        router.push(.history)
 
-        coordinator.handle(url: url)
+        router.path(for: .home).wrappedValue = []
 
-        #expect(coordinator.pendingNavigation != nil)
+        #expect(router.stack(for: .home).isEmpty)
     }
 
-    @Test("Handle unknown URL does nothing")
-    func handleUnknownURL() {
+    @Test("A destination pushed before startup keeps its section")
+    func deepLinkBeforeStartup() {
         let coordinator = NavigationCoordinator()
-        let url = URL(string: "https://example.com/unknown")!
 
-        coordinator.handle(url: url)
+        coordinator.navigate(to: .video(.id(.global("deep"))))
+        coordinator.router.applyStartupTabIfNeeded(.search)
 
-        #expect(coordinator.path.isEmpty)
+        #expect(coordinator.router.selection == .home)
+        #expect(coordinator.router.stack(for: .home) == [.video(.id(.global("deep")))])
+    }
+}
+
+// MARK: - NavigationRouter Layout Mapping Tests
+
+@Suite("NavigationRouter Layout Mapping Tests")
+@MainActor
+struct NavigationRouterLayoutMappingTests {
+
+    @Test("Available selection is left alone")
+    func availableSelectionUnchanged() {
+        let router = NavigationRouter()
+        router.select(.bookmarks)
+        router.push(.video(.id(.global("1"))))
+
+        router.ensureSelectionIsAvailable(isAvailable: { _ in true })
+
+        #expect(router.selection == .bookmarks)
+        #expect(router.stack(for: .bookmarks).count == 1)
+    }
+
+    @Test("Sidebar channel maps to the subscriptions tab with the channel pushed first")
+    func channelToSubscriptions() {
+        let router = NavigationRouter()
+        let source = ContentSource.global(provider: ContentSource.youtubeProvider)
+        let channel = SidebarItem.channel(channelID: "UC1", name: "Channel", source: source)
+        router.select(channel)
+        router.push(.video(.id(.global("v1"))))
+
+        router.ensureSelectionIsAvailable(isAvailable: { [.home, .search, .subscriptionsFeed].contains($0) })
+
+        #expect(router.selection == .subscriptionsFeed)
+        #expect(router.stack(for: .subscriptionsFeed) == [.channel("UC1", source), .video(.id(.global("v1")))])
+        #expect(router.stack(for: channel).isEmpty)
+    }
+
+    @Test("Hidden tab falls back to home with its screen pushed")
+    func hiddenTabToHome() {
+        let router = NavigationRouter()
+        router.select(.bookmarks)
+        router.push(.video(.id(.global("v1"))))
+
+        router.ensureSelectionIsAvailable(isAvailable: { [.home, .search].contains($0) })
+
+        #expect(router.selection == .home)
+        #expect(router.stack(for: .home) == [.bookmarks, .video(.id(.global("v1")))])
+    }
+
+    @Test("Sidebar playlist maps to the playlists tab")
+    func playlistToPlaylists() {
+        let router = NavigationRouter()
+        let id = UUID()
+        router.select(.playlist(id: id, title: "Mix"))
+
+        router.ensureSelectionIsAvailable(isAvailable: { [.home, .search, .playlistsList].contains($0) })
+
+        #expect(router.selection == .playlistsList)
+        #expect(router.stack(for: .playlistsList) == [.playlist(.local(id, title: "Mix"))])
     }
 }
 
@@ -713,5 +922,159 @@ struct ConnectivityMonitorTests {
 
         // By default, assume online until NWPathMonitor reports otherwise
         #expect(monitor.isOnline == true)
+    }
+}
+
+// MARK: - LinkActionParser Tests
+
+@Suite("LinkActionParser Tests")
+struct LinkActionParserTests {
+    let parser = LinkActionParser()
+
+    private func parse(_ string: String) -> LinkAction? {
+        parser.parse(URL(string: string)!)
+    }
+
+    @Test("Encoded and raw url= give the same inner link with its own query")
+    func encodedAndRawTargets() {
+        let inner = URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123")!
+        #expect(parse("yattee://queue?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ%26list%3DPL123") == .addToQueue(inner))
+        #expect(parse("yattee://queue?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123") == .addToQueue(inner))
+    }
+
+    @Test("Play takes the action's t, falling back to the link's own")
+    func playStartTime() {
+        #expect(parse("yattee://play?url=https://youtu.be/dQw4w9WgXcQ&t=1m30s")
+            == .play(URL(string: "https://youtu.be/dQw4w9WgXcQ")!, startTime: 90))
+        #expect(parse("yattee://play?url=https%3A%2F%2Fyoutu.be%2FdQw4w9WgXcQ%3Ft%3D42")
+            == .play(URL(string: "https://youtu.be/dQw4w9WgXcQ?t=42")!, startTime: 42))
+        #expect(parse("yattee://play?url=https://youtu.be/dQw4w9WgXcQ")
+            == .play(URL(string: "https://youtu.be/dQw4w9WgXcQ")!, startTime: nil))
+    }
+
+    @Test("x-callback parameters end the raw url")
+    func callbackParametersEndURL() {
+        let action = parse("yattee://bookmark?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&x-success=shortcuts://done")
+        #expect(action == .bookmark(URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")!))
+    }
+
+    @Test("Every target verb parses", arguments: [
+        ("play-next", LinkAction.playNext(URL(string: "https://youtu.be/abc")!)),
+        ("download", .download(URL(string: "https://youtu.be/abc")!)),
+        ("subscribe", .subscribe(URL(string: "https://youtu.be/abc")!)),
+        ("unsubscribe", .unsubscribe(URL(string: "https://youtu.be/abc")!)),
+    ])
+    func targetVerbs(_ verb: String, _ expected: LinkAction) {
+        #expect(parse("yattee://\(verb)?url=https://youtu.be/abc") == expected)
+    }
+
+    @Test("Missing, local or non-web targets are rejected")
+    func badTargets() {
+        #expect(parse("yattee://play") == nil)
+        #expect(parse("yattee://play?url=") == nil)
+        #expect(parse("yattee://play?url=file:///etc/hosts") == nil)
+        #expect(parse("yattee://queue?url=javascript:alert(1)") == nil)
+    }
+
+    @Test("Player commands")
+    func playerCommands() {
+        #expect(parse("yattee://player/pause") == .player(.pause))
+        #expect(parse("yattee://player/play") == .player(.play))
+        #expect(parse("yattee://player/toggle") == .player(.toggle))
+        #expect(parse("yattee://player/next") == .player(.next))
+        #expect(parse("yattee://player/previous") == .player(.previous))
+        #expect(parse("yattee://player/close") == .player(.close))
+        #expect(parse("yattee://player/seek?t=90") == .player(.seek(to: 90)))
+        #expect(parse("yattee://player/seek?t=1m") == .player(.seek(to: 60)))
+        #expect(parse("yattee://player/seek?by=-10") == .player(.seekBy(-10)))
+        #expect(parse("yattee://player/rate?value=1.5") == .player(.rate(1.5)))
+    }
+
+    @Test("Invalid player commands are rejected")
+    func badPlayerCommands() {
+        #expect(parse("yattee://player") == nil)
+        #expect(parse("yattee://player/explode") == nil)
+        #expect(parse("yattee://player/seek") == nil)
+        #expect(parse("yattee://player/seek?by=nan") == nil)
+        #expect(parse("yattee://player/rate?value=0") == nil)
+        #expect(parse("yattee://player/rate?value=inf") == nil)
+    }
+
+    @Test("Screen links are not actions, and the router leaves action hosts alone")
+    func separationFromRouter() {
+        #expect(parse("yattee://playlist/PL123") == nil)
+        #expect(parse("yattee://video/abc") == nil)
+        #expect(URLRouter().route(URL(string: "yattee://play?url=https://youtu.be/abc")!) == nil)
+        #expect(URLRouter().route(URL(string: "yattee://player/pause")!) == nil)
+    }
+
+    @Test("Only play dismisses sheets")
+    func actionTraits() {
+        let url = URL(string: "https://youtu.be/abc")!
+        #expect(LinkAction.play(url, startTime: nil).dismissesPresentations)
+        #expect(!LinkAction.player(.pause).dismissesPresentations)
+        #expect(!LinkAction.bookmark(url).dismissesPresentations)
+    }
+}
+
+// MARK: - XCallback Tests
+
+@Suite("XCallback Tests")
+struct XCallbackTests {
+    private func url(_ string: String) -> URL { URL(string: string)! }
+
+    @Test("x-callback-url requests parse to the same actions as plain links")
+    func actionsThroughXCallback() {
+        let parser = LinkActionParser()
+        #expect(parser.parse(url("yattee://x-callback-url/player/seek?t=9&x-success=shortcuts%3A%2F%2Fok")) == .player(.seek(to: 9)))
+        #expect(parser.parse(url("yattee://x-callback-url/player/state")) == .player(.state))
+        #expect(parser.parse(url("yattee://x-callback-url/queue?url=https://www.youtube.com/watch?v=abc&list=PL1&x-success=shortcuts%3A%2F%2Fok"))
+            == .addToQueue(url("https://www.youtube.com/watch?v=abc&list=PL1")))
+        #expect(parser.parse(url("yattee://x-callback-url/play?url=https%3A%2F%2Fyoutu.be%2Fabc&t=30"))
+            == .play(url("https://youtu.be/abc"), startTime: 30))
+        #expect(parser.parse(url("yattee://x-callback-url")) == nil)
+        #expect(parser.parse(url("yattee://x-callback-url/explode")) == nil)
+    }
+
+    @Test("Callbacks are read from the request, and only for x-callback-url")
+    func callbacksParse() throws {
+        let callback = try #require(XCallback(url("yattee://x-callback-url/player/pause?x-success=shortcuts%3A%2F%2Fx-callback-url%2Fok%3Fid%3D1&x-error=shortcuts%3A%2F%2Ferr&x-cancel=shortcuts%3A%2F%2Fcancel&x-source=Shortcuts")))
+        #expect(callback.success == url("shortcuts://x-callback-url/ok?id=1"))
+        #expect(callback.error == url("shortcuts://err"))
+        #expect(callback.cancel == url("shortcuts://cancel"))
+        #expect(callback.source == "Shortcuts")
+        #expect(XCallback(url("yattee://player/pause?x-success=shortcuts%3A%2F%2Fok")) == nil)
+    }
+
+    @Test("File and script callbacks are ignored")
+    func unsafeCallbacks() throws {
+        let callback = try #require(XCallback(url("yattee://x-callback-url/player/pause?x-success=file%3A%2F%2F%2Ftmp%2Fx&x-error=javascript%3Aalert(1)")))
+        #expect(callback.success == nil)
+        #expect(callback.error == nil)
+    }
+
+    @Test("Success appends values, keeping the callback's own query, escaping & = +")
+    func successURL() throws {
+        let callback = try #require(XCallback(url("yattee://x-callback-url/play?x-success=shortcuts%3A%2F%2Fok%3Fid%3D1")))
+        let result = try #require(callback.url(for: .success(["title": "Rock & Roll = 1+1", "videoID": "abc"])))
+        #expect(result.absoluteString == "shortcuts://ok?id=1&title=Rock%20%26%20Roll%20%3D%201%2B1&videoID=abc")
+        let items = URLComponents(url: result, resolvingAgainstBaseURL: false)?.queryItems
+        #expect(items?.first { $0.name == "title" }?.value == "Rock & Roll = 1+1")
+    }
+
+    @Test("Failure goes to x-error; cancel to x-cancel, else x-error")
+    func failureAndCancel() throws {
+        let both = try #require(XCallback(url("yattee://x-callback-url/play?x-error=app%3A%2F%2Ferr&x-cancel=app%3A%2F%2Fcancel")))
+        #expect(both.url(for: .failure(code: "noSource", message: "No source"))?.absoluteString == "app://err?errorCode=noSource&errorMessage=No%20source")
+        #expect(both.url(for: .cancelled) == url("app://cancel"))
+        #expect(both.url(for: .success()) == nil)
+
+        let errorOnly = try #require(XCallback(url("yattee://x-callback-url/play?x-error=app%3A%2F%2Ferr")))
+        #expect(errorOnly.url(for: .cancelled)?.absoluteString == "app://err?errorCode=cancelled&errorMessage=Cancelled")
+    }
+
+    @Test("The router leaves x-callback-url alone")
+    func routerIgnoresXCallback() {
+        #expect(URLRouter().route(url("yattee://x-callback-url/play?url=https://youtu.be/abc")) == nil)
     }
 }

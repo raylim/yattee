@@ -12,14 +12,16 @@ import SwiftUI
 /// Shows layout picker (list/grid), size options, and filter toggles.
 /// Reusable across different views with their own storage bindings.
 struct ViewOptionsSheet: View {
-    @Environment(\.appEnvironment) private var appEnvironment
     @Binding var layout: VideoListLayout
     @Binding var rowStyle: VideoRowStyle
     @Binding var gridColumns: Int
     
     /// Optional binding for hide watched toggle (only shown if provided).
     var hideWatched: Binding<Bool>?
-    
+
+    /// Optional binding for hide shorts toggle (only shown if provided).
+    var hideShorts: Binding<Bool>?
+
     /// Optional binding for channel strip size (only shown if provided).
     var channelStripSize: Binding<ChannelStripSize>?
 
@@ -73,6 +75,10 @@ struct ViewOptionsSheet: View {
 
                     if let hideWatched = hideWatched {
                         Toggle("viewOptions.hideWatched", isOn: hideWatched)
+                    }
+
+                    if let hideShorts = hideShorts {
+                        Toggle("viewOptions.hideShorts", isOn: hideShorts)
                     }
 
                     if let channelStripSize = channelStripSize {
@@ -139,6 +145,10 @@ struct ViewOptionsSheet: View {
                 // Filters (optional)
                 if let hideWatched = hideWatched {
                     Toggle("viewOptions.hideWatched", isOn: hideWatched)
+                }
+
+                if let hideShorts = hideShorts {
+                    Toggle("viewOptions.hideShorts", isOn: hideShorts)
                 }
 
                 // Channel Strip (subscriptions only)

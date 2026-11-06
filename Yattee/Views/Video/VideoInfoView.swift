@@ -7,6 +7,9 @@
 
 import SwiftUI
 import NukeUI
+#if !os(tvOS)
+import TipKit
+#endif
 
 /// Initialization mode for VideoInfoView - either a loaded video or just an ID to fetch.
 enum VideoInfoInitMode: Sendable {
@@ -16,7 +19,11 @@ enum VideoInfoInitMode: Sendable {
 
 struct VideoInfoView: View {
     @Environment(\.appEnvironment) private var appEnvironment
+    @Environment(\.presentAppSheet) private var presentAppSheet
     @Environment(\.videoQueueContext) private var videoQueueContext
+    #if os(tvOS)
+    @Environment(\.dismiss) private var dismiss
+    #endif
 
     private let initMode: VideoInfoInitMode
 
@@ -33,6 +40,9 @@ struct VideoInfoView: View {
     // Carousel scroll state (iOS only) - separate from currentVideoIndex to avoid mid-scroll updates
     #if os(iOS)
     @State private var carouselScrollPosition: Int?
+    @State private var clearsCarouselPositionWhenIdle = false
+    /// Last scroll offset, kept in a box so tracking it doesn't re-render the view every frame
+    @State private var carouselOffset = CarouselOffsetBox()
     #endif
     
     // Continuation loading state
@@ -41,7 +51,6 @@ struct VideoInfoView: View {
     @State private var loadMoreError: String?
     
     @State private var isBookmarked = false
-    @State private var showingPlaylistSheet = false
     @State private var showingCommentsSheet = false
     @State private var showingRemoveBookmarkAlert = false
     @State private var currentBookmark: Bookmark?
@@ -98,16 +107,15 @@ struct VideoInfoView: View {
 
     // Download state
     @State private var download: Download?
-    @State private var showingDownloadSheet = false
     @State private var isEnqueuingDownload = false
     @State private var showingRemoveDownloadConfirmation = false
     
     // Resume action sheet state
-    @State private var resumeSheetData: ResumeSheetData?
     
     // Video details cache - stores full video details loaded from API
     @State private var loadedVideoDetails: [String: Video] = [:]
     @State private var isLoadingVideoDetails = false
+    @State private var videoDetailsLoadError: String?
     /// Combined video list including originally loaded videos and extended videos from continuation
     private var allVideos: [Video]? {
         guard let originalList = videoQueueContext?.videoList else { return nil }
@@ -131,6 +139,14 @@ struct VideoInfoView: View {
     private var displayedVideo: Video? {
         guard let base = baseVideo else { return nil }
         return loadedVideoDetails[base.id.videoID] ?? base
+    }
+
+    /// Whether the displayed video is only an ID standing in for metadata
+    /// (a server-history row whose hydration failed), so a failed details
+    /// fetch leaves nothing worth rendering.
+    private var displayedVideoIsPlaceholder: Bool {
+        guard let video = displayedVideo else { return false }
+        return video.author.name.isEmpty && video.thumbnails.isEmpty
     }
 
     private var accentColor: Color {
@@ -172,6 +188,15 @@ struct VideoInfoView: View {
         guard !isLoadingVideoDetails else { return true }
         guard let description = displayedVideo?.description else { return false }
         return !description.isEmpty
+    }
+
+    /// Whether to surface a failed details fetch inline. The card still
+    /// renders from list metadata, but description/stats/related never
+    /// arrived — without this the sections just silently disappear.
+    private var shouldShowDetailsErrorSection: Bool {
+        guard !isLoadingVideoDetails, videoDetailsLoadError != nil,
+              let base = baseVideo else { return false }
+        return loadedVideoDetails[base.id.videoID] == nil
     }
 
     /// Whether the stats section should be visible.
@@ -219,13 +244,15 @@ struct VideoInfoView: View {
         videoQueueContext?.sourceLabel ?? displayedVideo?.title ?? ""
     }
     
-    /// Thumbnail width - larger for carousel on iOS
-    private var thumbnailWidth: CGFloat {
-        #if os(iOS)
-        return videoQueueContext != nil ? 280 : 240
-        #else
-        return 240
-        #endif
+    /// Maximum thumbnail width - full card width on iPhone, capped on iPad/macOS
+    private var thumbnailMaxWidth: CGFloat { 500 }
+
+    /// Explicit thumbnail width for a given card width. Sized explicitly (not via
+    /// aspectRatio fit) because the carousel's LazyHStack proposes its ideal height
+    /// back to the cards, and that ideal is driven by the loaded image's native
+    /// size - small thumbnails would shrink the card instead of scaling up.
+    private func thumbnailWidth(forCardWidth cardWidth: CGFloat) -> CGFloat {
+        min(max(cardWidth - 32, 0), thumbnailMaxWidth)
     }
     
     /// Dynamic label for the play button - shows "Continue at XX:XX" if video has meaningful progress
@@ -250,14 +277,20 @@ struct VideoInfoView: View {
     }
 
     var body: some View {
+        let _ = PerfCounter.body("VideoInfoView")
         Group {
-            if isLoadingInitialVideo {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if isLoadingInitialVideo || (displayedVideoIsPlaceholder && isLoadingVideoDetails) {
+                loadingView
             } else if let error = initialVideoLoadError {
+                videoLoadErrorView(error)
+            } else if let error = videoDetailsLoadError, displayedVideoIsPlaceholder {
                 videoLoadErrorView(error)
             } else if displayedVideo != nil {
                 videoContent
+            } else {
+                // The first frame in videoID mode, before the load has started:
+                // rendering nothing here would leave tvOS nothing to focus.
+                loadingView
             }
         }
         // Opaque background so the header gradient (which fades to windowBackgroundColor)
@@ -274,10 +307,61 @@ struct VideoInfoView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        #if !os(tvOS)
+        .toolbar {
+            if usesToolbarActions, displayedVideo != nil {
+                #if os(macOS)
+                // macOS has room for every action, so show them all as toolbar items.
+                // Explicit items rather than ForEach: a ForEach inside the toolbar builder
+                // is evaluated once and never picks up state changes (bookmark/download icons).
+                ToolbarItem(placement: .primaryAction) {
+                    toolbarActionView(.play, inMenu: false)
+                }
+                // Separate Play from the secondary actions so it gets its own glass pill.
+                if #available(macOS 26, *) {
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    toolbarActionView(.download, inMenu: false)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    toolbarActionView(.share, inMenu: false)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    toolbarActionView(.addToPlaylist, inMenu: false)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    toolbarActionView(.bookmark, inMenu: false)
+                }
+                #else
+                ToolbarItem(placement: .primaryAction) {
+                    toolbarActionView(primaryAction, inMenu: false)
+                }
+                if #available(iOS 26, *) {
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        ForEach(VideoInfoPrimaryAction.allCases.filter { $0 != primaryAction }, id: \.self) { action in
+                            toolbarActionView(action, inMenu: true)
+                        }
+                    } label: {
+                        Label(String(localized: "videoInfo.toolbar.moreActions"), systemImage: "ellipsis")
+                    }
+                }
+                #endif
+            }
+        }
+        #endif
         .onAppear {
-            // Initialize current index from queue context
+            #if !os(tvOS)
+            VideoInfoPlayThumbnailTip.isToolbarLayout = showsThumbnailPlayTip
+            #endif
+            // Initialize current index from queue context, resuming where this
+            // page was before a layout swap rebuilt it
             if currentVideoIndex == nil, let context = videoQueueContext {
-                currentVideoIndex = context.videoIndex
+                extendedVideoList = context.pageState.extendedVideoList
+                currentVideoIndex = context.pageState.currentVideoIndex ?? context.videoIndex
             }
             
             // Load initial video data (only if video is already loaded)
@@ -314,18 +398,19 @@ struct VideoInfoView: View {
             bookmarkSaveTask?.cancel()
         }
         .onChange(of: currentVideoIndex) { oldValue, newValue in
+            videoQueueContext?.pageState.currentVideoIndex = newValue
+
             // Skip if this is the initial value setting (handled by onAppear)
             guard oldValue != nil else { return }
 
             // Reset state when navigating to different video
             showingCommentsSheet = false
-            showingPlaylistSheet = false
-            showingDownloadSheet = false
             showingRemoveBookmarkAlert = false
             bookmarkSaveTask?.cancel()
             comments = []
             commentsState = .idle
             commentsContinuation = nil
+            videoDetailsLoadError = nil
             scrollViewID = UUID() // Reset scroll position
             // Don't reset scrollOffset here - let the new scroll view report its geometry
             // Resetting to 0 causes the blur to jump to an incorrect position briefly
@@ -365,11 +450,6 @@ struct VideoInfoView: View {
                 await loadVideoDetails()
             }
         }
-        .sheet(isPresented: $showingPlaylistSheet) {
-            if let video = displayedVideo {
-                PlaylistSelectorSheet(video: video)
-            }
-        }
         #if os(tvOS)
         .fullScreenCover(isPresented: $showingCommentsSheet) {
             commentsSheetContent
@@ -379,20 +459,7 @@ struct VideoInfoView: View {
             commentsSheetContent
         }
         #endif
-        .sheet(item: $resumeSheetData) { data in
-            ResumeActionSheet(
-                video: data.video,
-                resumeTime: data.resumeTime,
-                onContinue: { playVideoWithStartTime(data.resumeTime) },
-                onStartOver: { playVideoWithStartTime(0) }
-            )
-        }
         #if !os(tvOS)
-        .sheet(isPresented: $showingDownloadSheet) {
-            if let video = displayedVideo {
-                DownloadQualitySheet(video: video)
-            }
-        }
         .onChange(of: downloadManager?.completedDownloads) { _, newValue in
             // Update download state when completedDownloads changes
             if let video = displayedVideo {
@@ -456,12 +523,13 @@ struct VideoInfoView: View {
                 let extraTopPadding: CGFloat = 150
 
                 let blurOffset: CGFloat = -max(scrollOffset + safeAreaTop, 0) - extraTopPadding
+                let bgHeight = headerBackgroundHeight(for: geometry.size.width)
 
                 Color.clear
-                    .frame(height: headerBackgroundHeight + extraTopPadding)
+                    .frame(height: bgHeight + extraTopPadding)
                     .frame(maxWidth: .infinity)
                     .background(alignment: .bottom) {
-                        blurredThumbnailBackground
+                        blurredThumbnailBackground(height: bgHeight)
                     }
                     .clipped()
                     .offset(y: blurOffset)
@@ -470,78 +538,96 @@ struct VideoInfoView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        // Header with thumbnail, title, and channel
-                        headerSection
+                        // Header with thumbnail, title, and channel. Kept outside the
+                        // re-identified subtree below: recreating the carousel on every
+                        // page change resets its scroll offset (visible on the iPhone
+                        // Duo exterior display, where the restored position was lost).
+                        headerSection(cardWidth: geometry.size.width)
 
-                        // Action buttons
-                        actionButtons
+                        VStack(alignment: .leading, spacing: 0) {
+                            // Action buttons (inline layout only; toolbar layout puts them in the nav bar)
+                            if !usesToolbarActions {
+                                actionButtons
+                            } else {
+                                Spacer().frame(height: 12)
+                            }
 
-                        // Bookmark details section (only show if bookmarked)
-                        if isBookmarked, let bookmark = currentBookmark {
+                            // Bookmark details section (only show if bookmarked)
+                            if isBookmarked, let bookmark = currentBookmark {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                bookmarkDetailsSection(bookmark)
+                            }
+
+                            // Details fetch failed - show error with retry instead of
+                            // silently hiding the description/stats sections
+                            if shouldShowDetailsErrorSection {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                detailsErrorSection
+                            }
+
+                            // Description section (collapsible) - only show if description available
+                            if shouldShowDescriptionSection {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                descriptionSection
+                            }
+
+                            // Original title section - only show when DeArrow title is active
+                            if shouldShowOriginalTitleSection {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                originalTitleSection
+                            }
+
+                            // Stats section (collapsible) - only show if meaningful stats exist
+                            if shouldShowStatsSection {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                statsSection
+                            }
+
                             Divider()
                                 .padding(.horizontal)
 
-                            bookmarkDetailsSection(bookmark)
+                            // Comments section (collapsible)
+                            commentsSection
+
+                            // Related videos section (collapsible, only shown if videos exist)
+                            if let relatedVideos = displayedVideo?.relatedVideos, !relatedVideos.isEmpty {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                relatedVideosSection(relatedVideos)
+                            }
+
+
+                            // Watch history section (only show if entry exists)
+                            if let entry = watchEntry {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                watchHistorySection(entry)
+                            }
+
+                            #if !os(tvOS)
+                            // Download section (only show if downloaded)
+                            if let download = download, download.status == .completed {
+                                Divider()
+                                    .padding(.horizontal)
+
+                                downloadSection(download)
+                            }
+                            #endif
                         }
-
-                        // Description section (collapsible) - only show if description available
-                        if shouldShowDescriptionSection {
-                            Divider()
-                                .padding(.horizontal)
-
-                            descriptionSection
-                        }
-
-                        // Original title section - only show when DeArrow title is active
-                        if shouldShowOriginalTitleSection {
-                            Divider()
-                                .padding(.horizontal)
-
-                            originalTitleSection
-                        }
-
-                        // Stats section (collapsible) - only show if meaningful stats exist
-                        if shouldShowStatsSection {
-                            Divider()
-                                .padding(.horizontal)
-
-                            statsSection
-                        }
-
-                        Divider()
-                            .padding(.horizontal)
-
-                        // Comments section (collapsible)
-                        commentsSection
-
-                        // Related videos section (collapsible, only shown if videos exist)
-                        if let relatedVideos = displayedVideo?.relatedVideos, !relatedVideos.isEmpty {
-                            Divider()
-                                .padding(.horizontal)
-
-                            relatedVideosSection(relatedVideos)
-                        }
-
-
-                        // Watch history section (only show if entry exists)
-                        if let entry = watchEntry {
-                            Divider()
-                                .padding(.horizontal)
-
-                            watchHistorySection(entry)
-                        }
-
-                        #if !os(tvOS)
-                        // Download section (only show if downloaded)
-                        if let download = download, download.status == .completed {
-                            Divider()
-                                .padding(.horizontal)
-
-                            downloadSection(download)
-                        }
-                        #endif
+                        .id(currentVideoIndex) // Force re-render when video changes
                     }
-                    .id(currentVideoIndex) // Force re-render when video changes
                 }
                 #if !os(tvOS)
                 .scrollDismissesKeyboard(.interactively)
@@ -611,7 +697,7 @@ struct VideoInfoView: View {
                 Text(video.displayTitle(using: appEnvironment?.deArrowBrandingProvider))
                     .font(.title3)
                     .fontWeight(.semibold)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -626,7 +712,7 @@ struct VideoInfoView: View {
                 .focused($isPlayFocused)
 
                 Button {
-                    showingPlaylistSheet = true
+                    presentAddToPlaylist()
                 } label: {
                     Label(String(localized: "video.context.addToPlaylist"), systemImage: "text.badge.plus")
                         .frame(maxWidth: .infinity, minHeight: 50)
@@ -727,6 +813,12 @@ struct VideoInfoView: View {
                                 .padding(.horizontal)
                                 .padding(.vertical, 16)
                         }
+                    } else if shouldShowDetailsErrorSection {
+                        detailsErrorSection
+
+                        Divider()
+                            .padding(.horizontal)
+                            .padding(.vertical, 16)
                     }
 
                     if !isDescriptionScrollLocked {
@@ -775,7 +867,17 @@ struct VideoInfoView: View {
     }
     #endif
 
-    /// Error view shown when video fails to load (videoID init mode only).
+    private var loadingView: some View {
+        ProgressView()
+            #if os(tvOS)
+            .tvStalledLoadCancel { dismiss() }
+            #endif
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Error view shown when the video fails to load — either the initial
+    /// fetch in videoID mode, or the details fetch for a placeholder video
+    /// that has no metadata of its own to fall back on.
     @ViewBuilder
     private func videoLoadErrorView(_ message: String) -> some View {
         ContentUnavailableView {
@@ -786,27 +888,36 @@ struct VideoInfoView: View {
             Button(String(localized: "common.retry")) {
                 Task {
                     await loadInitialVideoIfNeeded()
+                    await loadVideoDetails()
                 }
             }
+
+            #if !os(tvOS)
+            Button {
+                presentAppSheet(.errorDetails(videoDetailsLoadError ?? initialVideoLoadError ?? "Unknown error"))
+            } label: {
+                Label(String(localized: "player.error.button"), systemImage: "info.circle")
+            }
+            #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Header Section
 
-    private var headerSection: some View {
+    private func headerSection(cardWidth: CGFloat) -> some View {
         VStack(alignment: .center, spacing: 0) {
             #if os(iOS)
             if videoQueueContext != nil, let videos = allVideos, !videos.isEmpty {
                 // iOS with queue: full-width carousel with peek thumbnails
-                thumbnailCarousel
+                thumbnailCarousel(cardWidth: cardWidth)
             } else {
                 // iOS without queue or empty queue: just the thumbnail
-                singleVideoCard
+                singleVideoCard(cardWidth: cardWidth)
             }
             #else
             // Non-iOS platforms: just the thumbnail
-            singleVideoCard
+            singleVideoCard(cardWidth: cardWidth)
             #endif
         }
         .padding(.top)
@@ -814,30 +925,30 @@ struct VideoInfoView: View {
 
     /// Blurred thumbnail background for ambient effect behind the header
     @ViewBuilder
-    private var blurredThumbnailBackground: some View {
+    private func blurredThumbnailBackground(height: CGFloat) -> some View {
         BlurredImageBackground(
             url: displayedVideo.flatMap { appEnvironment?.deArrowBrandingProvider.thumbnailURL(for: $0) } ?? displayedVideo?.reliableThumbnailURL,
             videoID: displayedVideo?.id.videoID,
             blurRadius: BlurredImageBackground.platformBlurRadius,
             scale: 1.8,
             gradientColor: headerBackgroundColor,
-            contentOpacity: blurredBackgroundOpacity
+            contentOpacity: blurredBackgroundOpacity(headerHeight: height)
         )
-        .frame(height: headerBackgroundHeight)
+        .frame(height: height)
     }
 
     /// Calculated height for the blurred background based on content
-    private var headerBackgroundHeight: CGFloat {
+    private func headerBackgroundHeight(for containerWidth: CGFloat) -> CGFloat {
         // Thumbnail height + title area + channel area + padding
         let titleHeight: CGFloat = 50  // Title with line limit 2
         let channelHeight: CGFloat = 60 // Avatar + name + subscribers
         let padding: CGFloat = 60      // Top and bottom padding
-        return thumbnailHeight + titleHeight + channelHeight + padding
+        return thumbnailHeight(for: containerWidth) + titleHeight + channelHeight + padding
     }
 
     /// Opacity for the blurred background that fades as user scrolls down
-    private var blurredBackgroundOpacity: Double {
-        let fadeDistance = headerBackgroundHeight * 0.5  // Fade 2x faster to hide hard edge before it's visible
+    private func blurredBackgroundOpacity(headerHeight: CGFloat) -> Double {
+        let fadeDistance = headerHeight * 0.5  // Fade 2x faster to hide hard edge before it's visible
         let progress = min(max(scrollOffset / fadeDistance, 0), 1)
         return 1.0 - progress
     }
@@ -855,11 +966,12 @@ struct VideoInfoView: View {
     
     /// Single video card without carousel (used when no queue context or non-iOS)
     @ViewBuilder
-    private var singleVideoCard: some View {
+    private func singleVideoCard(cardWidth: CGFloat) -> some View {
         if let video = displayedVideo {
-            videoCard(for: video, isLoadingMore: false, showTitle: true, isCurrent: true)
+            // No outer horizontal padding - the card pads its own content,
+            // matching the carousel cards which are laid out full-bleed.
+            videoCard(for: video, cardWidth: cardWidth, isLoadingMore: false, showTitle: true, isCurrent: true)
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal)
         }
     }
     
@@ -872,7 +984,7 @@ struct VideoInfoView: View {
     /// Full-width thumbnail carousel with peek effect (iOS only)
     /// Uses horizontal ScrollView with scrollTargetBehavior for native gesture handling
     @ViewBuilder
-    private var thumbnailCarousel: some View {
+    private func thumbnailCarousel(cardWidth: CGFloat) -> some View {
         #if os(iOS)
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -883,9 +995,15 @@ struct VideoInfoView: View {
                             // Prefer freshly loaded details for thumbnail (so expired proxy URLs get replaced) and avatar.
                             // Keep `video` as the card's stable identity so title/channel don't flicker.
                             let detailedVideo = loadedVideoDetails[video.id.videoID]
-                            videoCard(for: video, thumbnailFrom: detailedVideo, authorFrom: detailedVideo, isLoadingMore: isLoadingMoreVideos && isCurrent, showTitle: true, isCurrent: isCurrent)
+                            // Unless the list never had a title to keep: a row
+                            // from an account's server history arrives as its
+                            // own video ID, and holding on to that would leave
+                            // the card named after a string of characters under
+                            // the real channel and description.
+                            let titleVideo = video.hasPlaceholderTitle ? (detailedVideo ?? video) : video
+                            videoCard(for: titleVideo, cardWidth: cardWidth, thumbnailFrom: detailedVideo, authorFrom: detailedVideo, isLoadingMore: isLoadingMoreVideos && isCurrent, showTitle: true, isCurrent: isCurrent)
                                 .opacity(isCurrent ? 1.0 : peekOpacity)
-                                .containerRelativeFrame(.horizontal)
+                                .frame(width: cardWidth)
                                 .id(index)
                                 .onTapGesture {
                                     if !isCurrent {
@@ -899,18 +1017,40 @@ struct VideoInfoView: View {
                         
                         // Placeholder for loading more
                         if videoQueueContext?.canLoadMore == true {
-                            videoCardPlaceholder(isLoading: isLoadingMoreVideos)
+                            videoCardPlaceholder(isLoading: isLoadingMoreVideos, cardWidth: cardWidth)
                                 .opacity(peekOpacity)
-                                .containerRelativeFrame(.horizontal)
+                                .frame(width: cardWidth)
                                 .id("load-more-placeholder")
                         }
                     }
                 }
                 .scrollTargetLayout()
+                // The lazy stack keeps the old widths of cards it laid out
+                // off-screen, so after a resize (split view sidebar appearing,
+                // rotation, Duo unfold) every later card sits at a stale offset
+                // and the re-snap below lands between cards. A new identity per
+                // width drops those cached sizes.
+                .id(cardWidth)
             }
+            // Pin the viewport to the page width so paging stays aligned even
+            // when the scroll view extends under a horizontal safe area (iPhone
+            // Duo exterior status bar column, landscape notch).
+            .frame(width: cardWidth)
             .scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne))
             .scrollPosition(id: $carouselScrollPosition)
+            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.x } action: { _, new in
+                carouselOffset.value = new
+            }
             .onScrollPhaseChange { oldPhase, newPhase in
+                if newPhase == .interacting {
+                    clearsCarouselPositionWhenIdle = false
+                }
+                // Drop the re-snap request after a width change (see onChange(of: cardWidth))
+                if newPhase == .idle, clearsCarouselPositionWhenIdle {
+                    clearsCarouselPositionWhenIdle = false
+                    carouselScrollPosition = nil
+                    return
+                }
                 // Only update currentVideoIndex when scrolling ends (user lifts finger)
                 if newPhase == .idle, let newIndex = carouselScrollPosition, newIndex != currentVideoIndex {
                     currentVideoIndex = newIndex
@@ -923,6 +1063,27 @@ struct VideoInfoView: View {
                     proxy.scrollTo(newValue, anchor: .center)
                 }
             }
+            .onChange(of: cardWidth) { oldW, _ in
+                // A width change (iPhone Duo unfold, rotation, split resize) keeps
+                // the old point offset, leaving the cards misaligned. Re-snap to the
+                // current card (setting the same id is a no-op, hence the nil hop).
+                // The LazyHStack keeps re-applying a programmatic position while it
+                // realizes cards, which stopped the next swipe halfway between two
+                // cards, so the position is cleared again once the re-snap settles.
+                // Only animate when the current card was on screen at the old width
+                // (unfold, rotation). The first layout of a page opened on a later
+                // card also arrives as a width change (iPhone Duo status column
+                // inset), and animating that scrolls visibly from the first card.
+                guard let index = currentVideoIndex else { return }
+                let wasShowingCard = abs(carouselOffset.value - CGFloat(index) * (oldW + carouselSpacing)) < 1
+                carouselScrollPosition = nil
+                DispatchQueue.main.async {
+                    clearsCarouselPositionWhenIdle = true
+                    withAnimation(wasShowingCard ? .linear(duration: 0.15) : nil) {
+                        carouselScrollPosition = index
+                    }
+                }
+            }
             .onAppear {
                 // Initialize scroll position
                 if carouselScrollPosition == nil, let index = currentVideoIndex {
@@ -933,9 +1094,9 @@ struct VideoInfoView: View {
         #endif
     }
     
-    /// Height of thumbnail based on width and 16:9 aspect ratio
-    private var thumbnailHeight: CGFloat {
-        thumbnailWidth * 9 / 16
+    /// Height of thumbnail based on available width (minus horizontal padding), capped, and 16:9 aspect ratio
+    private func thumbnailHeight(for containerWidth: CGFloat) -> CGFloat {
+        thumbnailWidth(forCardWidth: containerWidth) * 9 / 16
     }
     
     /// A single video card with thumbnail, title, and channel info
@@ -946,10 +1107,11 @@ struct VideoInfoView: View {
     ///   - isLoadingMore: Whether to show loading overlay for continuation loading
     ///   - showTitle: Whether to show the title and channel (animates in/out)
     ///   - isCurrent: Whether this is the currently selected video (thumbnail tap plays video)
-    private func videoCard(for video: Video, thumbnailFrom: Video? = nil, authorFrom: Video? = nil, isLoadingMore: Bool, showTitle: Bool, isCurrent: Bool) -> some View {
+    private func videoCard(for video: Video, cardWidth: CGFloat, thumbnailFrom: Video? = nil, authorFrom: Video? = nil, isLoadingMore: Bool, showTitle: Bool, isCurrent: Bool) -> some View {
         let thumbnailSource = thumbnailFrom ?? video
         let deArrowURL = appEnvironment?.deArrowBrandingProvider.thumbnailURL(for: thumbnailSource)
         let thumbnailURLs = [deArrowURL].compactMap { $0 } + thumbnailSource.thumbnailURLsByQuality
+        let thumbWidth = thumbnailWidth(forCardWidth: cardWidth)
         return VStack(spacing: 12) {
             // Thumbnail with loading overlay
             ZStack {
@@ -975,31 +1137,42 @@ struct VideoInfoView: View {
                     }
                 }
                 .aspectRatio(16/9, contentMode: .fit)
-                .frame(width: thumbnailWidth)
 
                 // Loading overlay when fetching more videos (continuation)
                 if isLoadingMore {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(.black.opacity(0.4))
-                        .frame(width: thumbnailWidth)
-                        .aspectRatio(16/9, contentMode: .fit)
-                    
+
                     ProgressView()
                         .tint(.white)
                 }
             }
+            // Explicit size - see thumbnailWidth(forCardWidth:) for why aspectRatio
+            // fit can't be trusted here
+            .frame(width: thumbWidth, height: thumbWidth * 9 / 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal)
             .onTapGesture {
                 if isCurrent {
+                    #if !os(tvOS)
+                    VideoInfoPlayThumbnailTip().invalidate(reason: .actionPerformed)
+                    #endif
                     playVideo()
                 }
             }
+            #if !os(tvOS)
+            .modifier(VideoInfoPlayThumbnailTipModifier(enabled: isCurrent && showsThumbnailPlayTip, canSwipe: canSwipeThumbnails))
+            #endif
             
-            // Title
+            // Title - full card width so long titles fit more characters per line.
+            // Always reserves two lines of height so carousel cards don't shift
+            // vertically when swiping between short and long titles.
             Text(video.displayTitle(using: appEnvironment?.deArrowBrandingProvider))
                 .font(.headline)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(width: thumbnailWidth)
+                .lineLimit(2, reservesSpace: true)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
                 .opacity(showTitle ? 1.0 : 0.0)
             
             // Channel row (horizontal) - only tappable if we have real channel info
@@ -1017,6 +1190,8 @@ struct VideoInfoView: View {
                     channelRowContent(for: authorVideo)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal)
             .opacity(showTitle ? 1.0 : 0.0)
         }
     }
@@ -1054,51 +1229,54 @@ struct VideoInfoView: View {
     }
 
     /// Placeholder card shown when loading more videos
-    private func videoCardPlaceholder(isLoading: Bool) -> some View {
-        VStack(spacing: 12) {
+    private func videoCardPlaceholder(isLoading: Bool, cardWidth: CGFloat) -> some View {
+        let thumbWidth = thumbnailWidth(forCardWidth: cardWidth)
+        return VStack(alignment: .leading, spacing: 12) {
             // Thumbnail placeholder
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(.quaternary)
-                    .aspectRatio(16/9, contentMode: .fit)
-                    .frame(width: thumbnailWidth)
-                
+
                 if isLoading {
                     ProgressView()
                         .tint(.secondary)
                 }
             }
-            
+            .frame(width: thumbWidth, height: thumbWidth * 9 / 16)
+
             // Title placeholder
-            VStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(.quaternary)
-                    .frame(width: thumbnailWidth * 0.8, height: 16)
-                
+                    .frame(width: 220, height: 16)
+
                 RoundedRectangle(cornerRadius: 4)
                     .fill(.quaternary)
-                    .frame(width: thumbnailWidth * 0.5, height: 12)
+                    .frame(width: 140, height: 12)
             }
-            
+
             // Channel placeholder
-            VStack(spacing: 4) {
+            HStack(spacing: 10) {
                 // Avatar placeholder (circle)
                 Circle()
                     .fill(.quaternary)
-                    .frame(width: 56, height: 56)
-                
-                // Name placeholder
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(.quaternary)
-                    .frame(width: thumbnailWidth * 0.4, height: 14)
-                
-                // Subscriber count placeholder
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(.quaternary)
-                    .frame(width: thumbnailWidth * 0.25, height: 12)
+                    .frame(width: 40, height: 40)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    // Name placeholder
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(.quaternary)
+                        .frame(width: 110, height: 14)
+
+                    // Subscriber count placeholder
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(.quaternary)
+                        .frame(width: 70, height: 12)
+                }
             }
         }
-        .frame(width: thumbnailWidth)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal)
     }
 
     // MARK: - Action Buttons
@@ -1152,7 +1330,7 @@ struct VideoInfoView: View {
 
                 // Share button
                 if let video = displayedVideo {
-                    ShareLink(item: video.shareURL) {
+                    ShareLink(item: appEnvironment?.shareURL(for: video) ?? video.shareURL) {
                         #if os(macOS)
                         Label(String(localized: "video.share"), systemImage: "square.and.arrow.up")
                             .font(.body)
@@ -1181,7 +1359,7 @@ struct VideoInfoView: View {
             // Add to Playlist and Bookmark
             HStack(spacing: 12) {
                 Button {
-                    showingPlaylistSheet = true
+                    presentAddToPlaylist()
                 } label: {
                     Label(String(localized: "video.context.addToPlaylist"), systemImage: "text.badge.plus")
                         .frame(maxWidth: .infinity)
@@ -1205,13 +1383,105 @@ struct VideoInfoView: View {
         #if !os(macOS)
         .fontWeight(.semibold)
         #endif
+        // Leading-aligned to line up with the thumbnail/title column on wide screens
         .frame(maxWidth: 400)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)
         .padding(.vertical, 12)
     }
 
+    // MARK: - Toolbar Actions (iOS/macOS)
+
     #if !os(tvOS)
+    /// True when the user chose the toolbar layout in Layout & Navigation settings.
+    private var usesToolbarActions: Bool {
+        appEnvironment?.settingsManager.videoInfoActionsLayout == .toolbar
+    }
+
+    /// The action pinned to the toolbar; every other action lives in the ellipsis menu.
+    /// macOS shows every action in the toolbar, so the pinned action only matters on iOS.
+    private var primaryAction: VideoInfoPrimaryAction {
+        #if os(macOS)
+        .play
+        #else
+        appEnvironment?.settingsManager.videoInfoPrimaryAction ?? .play
+        #endif
+    }
+
+    /// The hero thumbnail is the only play affordance when the toolbar layout is active
+    /// and Play isn't the pinned action, so show the one-time "tap to play" tip.
+    private var showsThumbnailPlayTip: Bool {
+        usesToolbarActions && primaryAction != .play
+    }
+
+    /// The hero thumbnail is a swipeable carousel over the queue context (iOS only, see headerSection).
+    private var canSwipeThumbnails: Bool {
+        #if os(iOS)
+        videoQueueContext != nil && (allVideos?.count ?? 0) > 1
+        #else
+        false
+        #endif
+    }
+
+    /// One toolbar action rendered either as a standalone toolbar item or as a menu row.
+    /// The same Label works in both places: the toolbar shows the icon, the menu shows icon + text.
+    @ViewBuilder
+    private func toolbarActionView(_ action: VideoInfoPrimaryAction, inMenu: Bool) -> some View {
+        switch action {
+        case .play:
+            Button(action: playVideo) {
+                Label(inMenu ? playButtonLabel : String(localized: "video.context.play"), systemImage: "play.fill")
+            }
+        case .download:
+            toolbarDownloadAction
+        case .share:
+            if let video = displayedVideo {
+                ShareLink(item: appEnvironment?.shareURL(for: video) ?? video.shareURL) {
+                    Label(String(localized: "video.share"), systemImage: "square.and.arrow.up")
+                }
+            }
+        case .addToPlaylist:
+            Button {
+                presentAddToPlaylist()
+            } label: {
+                Label(String(localized: "video.context.addToPlaylist"), systemImage: "text.badge.plus")
+            }
+        case .bookmark:
+            Button(action: toggleBookmark) {
+                Label(
+                    isBookmarked ? String(localized: "video.removeBookmark") : String(localized: "video.bookmark"),
+                    systemImage: isBookmarked ? "bookmark.fill" : "bookmark"
+                )
+            }
+        }
+    }
+
+    /// Download action for the toolbar/menu, mirroring `verticalDownloadActionButton` states.
+    @ViewBuilder
+    private var toolbarDownloadAction: some View {
+        let isDownloaded = download?.status == .completed
+        let isDownloading = displayedVideo.flatMap { downloadManager?.isDownloading($0.id) } ?? false
+
+        if isDownloaded {
+            Button(role: .destructive) {
+                showingRemoveDownloadConfirmation = true
+            } label: {
+                Label(String(localized: "video.downloaded"), systemImage: "checkmark.circle.fill")
+            }
+        } else if isDownloading || isEnqueuingDownload {
+            Button {} label: {
+                Label(String(localized: "video.downloading"), systemImage: "arrow.down.circle.dotted")
+            }
+            .disabled(true)
+        } else if let video = displayedVideo {
+            Button {
+                startDownload(for: video)
+            } label: {
+                Label(String(localized: "video.download"), systemImage: "arrow.down.circle")
+            }
+        }
+    }
+
     /// Vertical download action button with four states: default, enqueueing, downloading, downloaded
     @ViewBuilder
     private var verticalDownloadActionButton: some View {
@@ -1328,7 +1598,7 @@ struct VideoInfoView: View {
     /// Starts a download either automatically or by showing the quality sheet.
     private func startDownload(for video: Video) {
         guard let appEnvironment else {
-            showingDownloadSheet = true
+            presentAppSheet(.downloadOptions(video))
             return
         }
 
@@ -1390,7 +1660,7 @@ struct VideoInfoView: View {
                 }
             }
         } else {
-            showingDownloadSheet = true
+            presentAppSheet(.downloadOptions(video))
         }
     }
 
@@ -1702,7 +1972,7 @@ struct VideoInfoView: View {
                         if bookmarkNote.count > 900 {
                             HStack {
                                 Spacer()
-                                Text("\(bookmarkNote.count)/1000")
+                                Text(verbatim: "\(bookmarkNote.count)/1000")
                                     .font(.caption)
                                     .foregroundStyle(bookmarkNote.count > 1000 ? .red : .secondary)
                                     .monospacedDigit()
@@ -1733,6 +2003,46 @@ struct VideoInfoView: View {
                 .fontWeight(.medium)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Details Error Section
+
+    /// Inline error shown when the details fetch failed but the video card
+    /// still renders from list metadata (e.g. deleted/unavailable video).
+    private var detailsErrorSection: some View {
+        VStack(spacing: 12) {
+            Label(String(localized: "video.error.title"), systemImage: "exclamationmark.triangle")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+
+            if let error = videoDetailsLoadError {
+                Text(error)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            HStack(spacing: 12) {
+                Button(String(localized: "common.retry")) {
+                    Task {
+                        await loadVideoDetails()
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                #if !os(tvOS)
+                Button {
+                    presentAppSheet(.errorDetails(videoDetailsLoadError ?? initialVideoLoadError ?? "Unknown error"))
+                } label: {
+                    Label(String(localized: "player.error.button"), systemImage: "info.circle")
+                }
+                .buttonStyle(.bordered)
+                #endif
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal)
+        .padding(.vertical, 16)
     }
 
     // MARK: - Description Section
@@ -1968,9 +2278,7 @@ struct VideoInfoView: View {
                         }
                     }
                 }
-                #if os(tvOS)
-                .background(Color.black.ignoresSafeArea())
-                #endif
+                .tvFullScreenCoverBackground()
                 .navigationTitle(String(localized: "videoInfo.section.comments"))
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
@@ -1988,6 +2296,11 @@ struct VideoInfoView: View {
     }
 
     // MARK: - Actions
+
+    private func presentAddToPlaylist() {
+        guard let video = displayedVideo else { return }
+        presentAppSheet(.addToPlaylist(video))
+    }
 
     private func toggleBookmark() {
         guard let dataManager, let video = displayedVideo else { return }
@@ -2148,7 +2461,8 @@ struct VideoInfoView: View {
             // Skip API fetch for local media sources (SMB, WebDAV, local files)
             if extractor == MediaFile.smbProvider
                 || extractor == MediaFile.webdavProvider
-                || extractor == MediaFile.localFolderProvider {
+                || extractor == MediaFile.localFolderProvider
+                || extractor == DirectMediaHelper.provider {
                 isLoadingVideoDetails = false
                 return
             }
@@ -2162,6 +2476,7 @@ struct VideoInfoView: View {
             }
 
             isLoadingVideoDetails = true
+            videoDetailsLoadError = nil
             do {
                 // Use extractURL method - just use the video part
                 let (fullVideo, _, _) = try await contentService.extractURL(originalURL, instance: instance)
@@ -2170,7 +2485,9 @@ struct VideoInfoView: View {
                 loadedVideoDetails[videoID] = fullVideo
                 CachedChannelData.cacheAuthor(fullVideo.author)
             } catch {
-                // Fail silently - use partial video data we have
+                // Use the partial video data we have; the body surfaces the
+                // error only when the video is a bare placeholder.
+                videoDetailsLoadError = error.localizedDescription
             }
             isLoadingVideoDetails = false
             return
@@ -2185,6 +2502,7 @@ struct VideoInfoView: View {
         }
 
         isLoadingVideoDetails = true
+        videoDetailsLoadError = nil
 
         do {
             let fullVideo = try await contentService.video(
@@ -2196,7 +2514,9 @@ struct VideoInfoView: View {
             loadedVideoDetails[videoID] = fullVideo
             CachedChannelData.cacheAuthor(fullVideo.author)
         } catch {
-            // Fail silently - just use the partial video data we have
+            // Use the partial video data we have; the body surfaces the
+            // error only when the video is a bare placeholder.
+            videoDetailsLoadError = error.localizedDescription
         }
 
         isLoadingVideoDetails = false
@@ -2277,6 +2597,14 @@ struct VideoInfoView: View {
             return
         }
 
+        // An opened timed link asks for an exact position - honor it over any
+        // saved progress, without the resume prompt.
+        if let linkStartTime = videoQueueContext?.linkStartTime,
+           videoQueueContext?.video.id == video.id {
+            playVideoWithStartTime(linkStartTime, forceStartTime: true)
+            return
+        }
+
         // Get saved watch progress from database
         let savedProgress = env.dataManager.watchProgress(for: video.id.videoID)
         let videoDuration = video.duration
@@ -2298,7 +2626,12 @@ struct VideoInfoView: View {
                 playVideoWithStartTime(0)
             case .ask:
                 // Show the resume action sheet
-                resumeSheetData = ResumeSheetData(video: video, resumeTime: savedProgress)
+                presentAppSheet(.resumeAction(
+                    video,
+                    resumeTime: savedProgress,
+                    onContinue: { playVideoWithStartTime(savedProgress) },
+                    onStartOver: { playVideoWithStartTime(0) }
+                ))
             }
         } else {
             // No saved progress or video was completed - play from beginning
@@ -2307,7 +2640,7 @@ struct VideoInfoView: View {
     }
     
     /// Plays the video with the specified start time.
-    private func playVideoWithStartTime(_ time: TimeInterval) {
+    private func playVideoWithStartTime(_ time: TimeInterval, forceStartTime: Bool = false) {
         guard let video = displayedVideo else { return }
 
         // Media-browser playback must go through `playFromMediaBrowser` so the
@@ -2336,7 +2669,7 @@ struct VideoInfoView: View {
               let list = context.videoList else {
             // No queue context - play single video
             if time > 0 {
-                playerService?.openVideo(video, startTime: time)
+                playerService?.openVideo(video, startTime: time, forceStartTime: forceStartTime)
             } else {
                 playerService?.openVideo(video)
             }
@@ -2447,6 +2780,7 @@ struct VideoInfoView: View {
             let videosToAdd = Array(newVideos.prefix(remainingCapacity))
             
             extendedVideoList.append(contentsOf: videosToAdd)
+            videoQueueContext?.pageState.extendedVideoList = extendedVideoList
         } catch {
             loadMoreError = error.localizedDescription
         }
@@ -2549,3 +2883,9 @@ private struct VideoInfoScrollOffsetModifier: ViewModifier {
             .videoQueueContext(.init(video: .preview, queueSource: .manual, sourceLabel: "Manual", videoList: [.preview, .livePreview], videoIndex: 0, startTime: 0, loadMoreVideos: .none))
     }
 }
+
+#if os(iOS)
+private final class CarouselOffsetBox {
+    var value: CGFloat = 0
+}
+#endif

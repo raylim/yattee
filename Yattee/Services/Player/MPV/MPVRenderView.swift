@@ -104,12 +104,16 @@ final class MPVRenderView: UIView {
     private var renderWidth: GLint = 0
     private var renderHeight: GLint = 0
 
-    /// Last known stable size (for throttling resize events)
-    private var lastStableSize: CGSize = .zero
     /// Pending resize work item (for debouncing)
     private var pendingResizeWorkItem: DispatchWorkItem?
-    /// Minimum time between framebuffer recreations
-    private let resizeDebounceInterval: TimeInterval = 0.1
+
+    /// When the view size last changed away from the framebuffer size.
+    private var lastSizeChangeTime: CFTimeInterval = 0
+
+    /// Size changes closer together than this are one continuous resize
+    /// (animated layout change, rotation) and recreate the framebuffer only
+    /// once it settles.
+    private static let continuousResizeWindow: CFTimeInterval = 0.15
 
     /// Dedicated queue for OpenGL rendering (off main thread).
     private let renderQueue = DispatchQueue(label: "stream.yattee.mpv.render", qos: .userInteractive)
@@ -129,6 +133,33 @@ final class MPVRenderView: UIView {
 
     /// Callback when view is added to a window (for PiP setup)
     var onDidMoveToWindow: ((UIView) -> Void)?
+
+    /// Set while the loaded stream has no video (audio-only). There is
+    /// nothing to draw, so the display link keeps itself paused instead of
+    /// rendering at display rate; any resume pauses it again on its first fire.
+    var hasNoVideo = false {
+        didSet {
+            guard hasNoVideo != oldValue else { return }
+            MPVLogging.log("hasNoVideo = \(hasNoVideo)")
+            if !hasNoVideo, !isInBackground {
+                displayLink?.isPaused = false
+            }
+        }
+    }
+
+    /// Set while playback is paused. The frame on screen stays current until
+    /// mpv asks for a redraw (seek, track or subtitle change), so the display
+    /// link skips rendering instead of redrawing the same frame at display rate.
+    var isPlaybackPaused = false {
+        didSet {
+            guard isPlaybackPaused != oldValue else { return }
+            needsRedraw = true
+        }
+    }
+
+    /// Set by mpv's render update callback; cleared when a render is queued.
+    /// Main thread only.
+    private var needsRedraw = true
 
     // MARK: - PiP Frame Capture
 
@@ -151,6 +182,8 @@ final class MPVRenderView: UIView {
     /// Whether PiP is currently active (skip presenting to main view to save performance)
     var isPiPActive = false {
         didSet {
+            // The main view wasn't presented to during PiP
+            needsRedraw = true
             // When PiP ends and view is not in hierarchy, stop the display link
             // (we kept it running for PiP frame capture, now it can be stopped)
             if !isPiPActive && superview == nil && !captureFramesForPiP {
@@ -176,6 +209,44 @@ final class MPVRenderView: UIView {
     /// Scale factor for PiP capture (1.0 = full res, 0.5 = half res)
     private let pipCaptureScale: CGFloat = 1.0
 
+    // MARK: - Reflection Capture
+
+    /// Layer that receives a vertically mirrored, quarter-resolution copy of
+    /// every presented frame while `isReflectionEnabled` is set. Hosted by
+    /// `MPVReflectionView` (iPhone Duo tabletop layout); contents are already
+    /// mirrored, so the host applies no transform.
+    let reflectionLayer = MPVReflectionLayer()
+
+    /// Whether to mirror frames into `reflectionLayer` (set by the backend).
+    var isReflectionEnabled = false {
+        didSet {
+            guard isReflectionEnabled != oldValue, !isReflectionEnabled else { return }
+            renderQueue.async { [weak self] in
+                guard let self, let eaglContext else { return }
+                EAGLContext.setCurrent(eaglContext)
+                destroyReflectionCapture()
+            }
+            reflectionLayer.clear()
+        }
+    }
+
+    /// Ring of IOSurface-backed targets so CoreAnimation never reads the
+    /// buffer GL is currently writing.
+    private var reflectionTargets: [ReflectionTarget] = []
+    private var reflectionTargetIndex = 0
+    private var reflectionTextureCache: CVOpenGLESTextureCache?
+    private var reflectionCaptureWidth = 0
+    private var reflectionCaptureHeight = 0
+
+    /// Downscale factor for the reflection; the low resolution doubles as a cheap blur.
+    private let reflectionCaptureScale: CGFloat = 0.25
+
+    private struct ReflectionTarget {
+        let pixelBuffer: CVPixelBuffer
+        let texture: CVOpenGLESTexture
+        var framebuffer: GLuint
+    }
+
     // MARK: - Full Resolution Rendering for PiP
 
     /// Offscreen framebuffer for full-resolution rendering when PiP capture is active.
@@ -196,6 +267,36 @@ final class MPVRenderView: UIView {
 
     /// Tracks whether app is in background (to prevent GPU work)
     private var isInBackground = false
+
+    // MARK: - Diagnostics
+
+    /// Live render views, sampled by `BackgroundDiagnostics`.
+    private static let liveInstances = NSHashTable<MPVRenderView>.weakObjects()
+
+    static var diagnosticsInstances: [MPVRenderView] {
+        liveInstances.allObjects
+    }
+
+    /// Render activity since the last diagnostics sample (written from main and the render queue).
+    private let diagnosticsCounters = RenderDiagnosticsCounters()
+
+    /// One-line render state for the diagnostics heartbeat. Resets the activity counters.
+    func diagnosticsSummary() -> String {
+        let counts = diagnosticsCounters.take()
+        let link: String
+        if let displayLink {
+            link = displayLink.isPaused ? "paused" : "running@\(Int(videoFPS))"
+        } else {
+            link = "none"
+        }
+        return "view=\(String(UInt(bitPattern: ObjectIdentifier(self).hashValue), radix: 16).suffix(6))"
+            + " window=\(window != nil) superview=\(superview != nil) hidden=\(isHidden) setup=\(isSetup)"
+            + " displayLink=\(link) inBackground=\(isInBackground) pip=\(isPiPActive)"
+            + " capturePiP=\(captureFramesForPiP) bgTimer=\(backgroundRenderTimer != nil)"
+            + " fb=\(renderWidth)x\(renderHeight)"
+            + " | linkFires=\(counts.linkFires) renders=\(counts.renders) presents=\(counts.presents)"
+            + " backgroundRenders=\(counts.backgroundRenders) skippedInBackground=\(counts.skippedInBackground)"
+    }
 
     // MARK: - Video Dimensions for PiP
 
@@ -228,8 +329,12 @@ final class MPVRenderView: UIView {
     }
 
     private func commonInit() {
+        Self.liveInstances.add(self)
         backgroundColor = .black
-        contentScaleFactor = UIScreen.main.scale
+        contentScaleFactor = traitCollection.displayScale
+        registerForTraitChanges([UITraitDisplayScale.self]) { (self: MPVRenderView, _) in
+            self.contentScaleFactor = self.traitCollection.displayScale
+        }
 
         // Configure EAGL layer
         // Note: retainedBacking=true is required for glReadPixels to work (PiP frame capture).
@@ -376,6 +481,7 @@ final class MPVRenderView: UIView {
             EAGLContext.setCurrent(eaglContext)
             destroyFullResFramebuffer()
             destroyPiPCapture()
+            destroyReflectionCapture()
             destroyFramebufferResources()
         }
         eaglContext = nil
@@ -463,12 +569,40 @@ final class MPVRenderView: UIView {
         // Cancel any pending resize
         pendingResizeWorkItem?.cancel()
 
-        // Always recreate framebuffer immediately to ensure video is properly sized
-        // This is important during rotation animations
-        lastStableSize = bounds.size
+        // A continuous resize (corner layout panel toggles, rotation) changes
+        // the size every animation frame. Recreating + rendering per step
+        // blocks main on renderQueue.sync (waiting out the in-flight render,
+        // then rendering again) and drops the animation to a few fps. Let the
+        // layer stretch the last frame meanwhile — the view keeps the video's
+        // aspect ratio — and recreate once the size settles. A one-off resize
+        // (e.g. handing the view to the mini player) still recreates now.
+        let now = CACurrentMediaTime()
+        let isContinuousResize = now - lastSizeChangeTime < Self.continuousResizeWindow
+        lastSizeChangeTime = now
+        if isContinuousResize {
+            MPVLogging.log("layoutSubviews: deferring framebuffer recreation (continuous resize)")
+            let workItem = DispatchWorkItem { [weak self] in
+                // Settled: the next layout pass recreates immediately
+                self?.lastSizeChangeTime = 0
+                self?.setNeedsLayout()
+            }
+            pendingResizeWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.continuousResizeWindow, execute: workItem)
+            return
+        }
+
         renderQueue.sync {
             destroyFramebuffer()
             createFramebuffer()
+
+            // The new layer storage is empty until something is presented into it;
+            // waiting for the next display link tick shows a blank blink (e.g. the
+            // expanded player handing its view to the mini player). Draw the current
+            // frame now so the resize lands with content.
+            if framebuffer != 0, !isInBackground, mpvHasFrameReady {
+                performRender()
+                EAGLContext.setCurrent(nil)
+            }
         }
     }
 
@@ -523,7 +657,6 @@ final class MPVRenderView: UIView {
 
             // Create framebuffer only if view has valid bounds
             // (createFramebuffer makes the context current itself and unbinds on exit)
-            lastStableSize = bounds.size
             if bounds.size != .zero {
                 renderQueue.sync {
                     createFramebuffer()
@@ -548,6 +681,7 @@ final class MPVRenderView: UIView {
         // Set up render update callback (for general redraws)
         client.onRenderUpdate = { [weak self] in
             DispatchQueue.main.async {
+                self?.needsRedraw = true
                 self?.setNeedsDisplay()
             }
         }
@@ -727,6 +861,9 @@ final class MPVRenderView: UIView {
     private func startDisplayLink() {
         MPVLogging.logDisplayLink("creating", targetFPS: videoFPS)
         displayLink = CADisplayLink(target: self, selector: #selector(displayLinkFired))
+        // Created in the background (view re-added during a lock): stay paused
+        // until appDidBecomeActive, as in resumeRendering.
+        displayLink?.isPaused = isInBackground && !isPiPActive && !captureFramesForPiP
         updateDisplayLinkFrameRate()
         displayLink?.add(to: .main, forMode: .common)
         MPVLogging.logDisplayLink("started", isPaused: displayLink?.isPaused, targetFPS: videoFPS)
@@ -787,6 +924,16 @@ final class MPVRenderView: UIView {
             return
         }
 
+        // Layout can rebuild the player's container after the app entered the
+        // background (e.g. a lock during a quick inactive/active bounce), which
+        // calls this. The display link never fires there, but left running it
+        // matched a TestFlight report of ~36% CPU on an unnamed thread for as
+        // long as the app stayed alive. appDidBecomeActive resumes it.
+        guard !isInBackground || isPiPActive || captureFramesForPiP else {
+            LoggingService.shared.info("MPV RenderView: resumeRendering ignored in background", category: .mpv)
+            return
+        }
+
         displayLink.isPaused = false
         MPVLogging.logDisplayLink("resumed", isPaused: false, reason: "resumeRendering")
         LoggingService.shared.debug("MPV RenderView: displayLink resumed", category: .mpv)
@@ -806,6 +953,7 @@ final class MPVRenderView: UIView {
         frameGeneration += 1  // Invalidate any pending callbacks from previous video
         hasRenderedFirstFrame = false
         mpvHasFrameReady = false
+        needsRedraw = true
     }
 
     /// Clear the render view to black (call when switching videos to hide old frame)
@@ -830,8 +978,24 @@ final class MPVRenderView: UIView {
     // MARK: - Rendering
 
     @objc private func displayLinkFired() {
+        diagnosticsCounters.increment(\.linkFires)
+        PerfCounter.count("render.displayLink")
+
+        if hasNoVideo, !captureFramesForPiP {
+            displayLink?.isPaused = true
+            return
+        }
+
         // Skip if not setup, already rendering, or app is in background (GPU work not permitted)
         guard isSetup, !isRendering, !isInBackground else { return }
+
+        // Paused with the current frame already on screen: nothing new to draw.
+        // PiP capture keeps feeding its sample buffer layer at its own pace.
+        if isPlaybackPaused, !needsRedraw, hasRenderedFirstFrame, !captureFramesForPiP {
+            PerfCounter.count("render.skippedPaused")
+            return
+        }
+        needsRedraw = false
 
         isRendering = true
 
@@ -855,6 +1019,24 @@ final class MPVRenderView: UIView {
 
     private func performRender() {
         defer { isRendering = false }
+
+        // GPU work is not permitted in the background, and presenting there
+        // aborts inside the GL driver. The display link already checks this,
+        // but renders queued by appDidBecomeActive/resumeRendering can run
+        // after the app went back to the background. PiP keeps rendering.
+        guard !isInBackground || isPiPActive else {
+            diagnosticsCounters.increment(\.skippedInBackground)
+            PerfCounter.count("render.skippedInBackground")
+            MPVLogging.log("performRender: skipped (app in background)")
+            return
+        }
+        diagnosticsCounters.increment(\.renders)
+        PerfCounter.count("render.frame")
+        if isInBackground {
+            diagnosticsCounters.increment(\.backgroundRenders)
+            PerfCounter.count("render.frameInBackground")
+        }
+
         let frameStart = Date()
         let tFrameStart = CACurrentMediaTime()
         let gapSincePrevFrame = lastRenderStartMediaTime > 0 ? tFrameStart - lastRenderStartMediaTime : 0
@@ -922,10 +1104,17 @@ final class MPVRenderView: UIView {
 
         let tRenderEnd = CACurrentMediaTime()
 
-        // Present the renderbuffer (skip when PiP is active - main view is hidden anyway)
-        if !isPiPActive {
+        // Present the renderbuffer (skip when PiP is active - main view is hidden anyway).
+        // Re-checked here: the app can enter the background while mpv renders.
+        if isInBackground && !isPiPActive {
+            MPVLogging.log("performRender: present skipped (app entered background)")
+        } else if !isPiPActive {
             glBindRenderbuffer(GLenum(GL_RENDERBUFFER), colorRenderbuffer)
             let presented = eaglContext.presentRenderbuffer(Int(GL_RENDERBUFFER))
+            if presented {
+                diagnosticsCounters.increment(\.presents)
+                PerfCounter.count("render.present")
+            }
             if !presented {
                 MPVLogging.warn("performRender: presentRenderbuffer FAILED",
                     details: "fb:\(framebuffer) rb:\(colorRenderbuffer) layer:\(layer.bounds) superview:\(superview != nil)")
@@ -963,6 +1152,11 @@ final class MPVRenderView: UIView {
         if renderFrameLogCounter % 300 == 1 {
             MPVLogging.logRender("periodic status", fbo: GLint(framebuffer),
                 width: renderWidth, height: renderHeight, success: ctxSet)
+        }
+
+        // Mirror the presented frame into the reflection layer if enabled
+        if isReflectionEnabled && mpvHasFrameReady && !isPiPActive {
+            captureFrameForReflection()
         }
 
         // Capture frame for PiP if enabled
@@ -1297,6 +1491,118 @@ final class MPVRenderView: UIView {
         DispatchQueue.main.async {
             callback(pixelBuffer, presentationTime)
         }
+    }
+
+    // MARK: - Reflection Capture (Zero-Copy)
+
+    /// Blit the display framebuffer, downscaled and without the usual Y flip,
+    /// into the next IOSurface target and hand it to the reflection layer. GL's
+    /// bottom-left origin lands in the top-left-origin surface upside down,
+    /// which is exactly the mirrored image a reflection needs.
+    private func captureFrameForReflection() {
+        guard EAGLContext.current() === eaglContext, renderWidth > 0, renderHeight > 0 else { return }
+
+        setupReflectionCapture(
+            width: max(1, Int(CGFloat(renderWidth) * reflectionCaptureScale)),
+            height: max(1, Int(CGFloat(renderHeight) * reflectionCaptureScale))
+        )
+        guard !reflectionTargets.isEmpty else { return }
+
+        let target = reflectionTargets[reflectionTargetIndex]
+        reflectionTargetIndex = (reflectionTargetIndex + 1) % reflectionTargets.count
+
+        glBindFramebuffer(GLenum(GL_READ_FRAMEBUFFER), framebuffer)
+        glBindFramebuffer(GLenum(GL_DRAW_FRAMEBUFFER), target.framebuffer)
+        glBlitFramebuffer(
+            0, 0, renderWidth, renderHeight,
+            0, 0, GLint(reflectionCaptureWidth), GLint(reflectionCaptureHeight),
+            GLbitfield(GL_COLOR_BUFFER_BIT),
+            GLenum(GL_LINEAR)
+        )
+        glBindFramebuffer(GLenum(GL_FRAMEBUFFER), framebuffer)
+        glFlush()
+
+        guard let surface = CVPixelBufferGetIOSurface(target.pixelBuffer)?.takeUnretainedValue() else { return }
+        let layer = reflectionLayer
+        DispatchQueue.main.async {
+            layer.display(surface)
+        }
+    }
+
+    private func setupReflectionCapture(width: Int, height: Int) {
+        guard let eaglContext else { return }
+        if width == reflectionCaptureWidth && height == reflectionCaptureHeight && !reflectionTargets.isEmpty {
+            return
+        }
+        destroyReflectionCapture()
+
+        var cache: CVOpenGLESTextureCache?
+        guard CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, nil, eaglContext, nil, &cache) == kCVReturnSuccess,
+              let cache else {
+            LoggingService.shared.warning("MPV Reflection: Failed to create texture cache", category: .mpv)
+            return
+        }
+        reflectionTextureCache = cache
+
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
+            kCVPixelBufferOpenGLESCompatibilityKey as String: true
+        ]
+
+        var targets: [ReflectionTarget] = []
+        for _ in 0..<3 {
+            var pixelBuffer: CVPixelBuffer?
+            guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                      attributes as CFDictionary, &pixelBuffer) == kCVReturnSuccess,
+                  let pixelBuffer else { break }
+
+            var texture: CVOpenGLESTexture?
+            guard CVOpenGLESTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, cache, pixelBuffer, nil, GLenum(GL_TEXTURE_2D), GL_RGBA,
+                GLsizei(width), GLsizei(height), GLenum(GL_BGRA), GLenum(GL_UNSIGNED_BYTE), 0, &texture
+            ) == kCVReturnSuccess, let texture else { break }
+
+            var fbo: GLuint = 0
+            glGenFramebuffers(1, &fbo)
+            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), fbo)
+            glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0), GLenum(GL_TEXTURE_2D),
+                                   CVOpenGLESTextureGetName(texture), 0)
+            guard glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER)) == GL_FRAMEBUFFER_COMPLETE else {
+                glDeleteFramebuffers(1, &fbo)
+                break
+            }
+            targets.append(ReflectionTarget(pixelBuffer: pixelBuffer, texture: texture, framebuffer: fbo))
+        }
+        glBindFramebuffer(GLenum(GL_FRAMEBUFFER), framebuffer)
+
+        guard targets.count == 3 else {
+            LoggingService.shared.warning("MPV Reflection: Failed to create capture targets (\(targets.count)/3)", category: .mpv)
+            reflectionTargets = targets
+            destroyReflectionCapture()
+            return
+        }
+        reflectionTargets = targets
+        reflectionTargetIndex = 0
+        reflectionCaptureWidth = width
+        reflectionCaptureHeight = height
+        LoggingService.shared.debug("MPV Reflection: capture setup \(width)x\(height)", category: .mpv)
+    }
+
+    /// Must run on the render queue with the context current.
+    private func destroyReflectionCapture() {
+        for var target in reflectionTargets where target.framebuffer != 0 {
+            glDeleteFramebuffers(1, &target.framebuffer)
+        }
+        reflectionTargets = []
+        if let cache = reflectionTextureCache {
+            CVOpenGLESTextureCacheFlush(cache, 0)
+        }
+        reflectionTextureCache = nil
+        reflectionCaptureWidth = 0
+        reflectionCaptureHeight = 0
     }
 
 }

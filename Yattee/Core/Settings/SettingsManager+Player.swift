@@ -13,17 +13,6 @@ import UIKit
 extension SettingsManager {
     // MARK: - Player Settings
 
-    var keepPlayerPinnedEnabled: Bool {
-        get {
-            if let cached = _keepPlayerPinnedEnabled { return cached }
-            return bool(for: .keepPlayerPinned, default: false)
-        }
-        set {
-            _keepPlayerPinnedEnabled = newValue
-            set(newValue, for: .keepPlayerPinned)
-        }
-    }
-
     #if os(iOS)
     /// Whether in-app orientation lock is enabled.
     /// When enabled, ignores accelerometer rotation detection and stays in current orientation.
@@ -63,6 +52,19 @@ extension SettingsManager {
         set {
             _preferPortraitBrowsing = newValue
             set(newValue, for: .preferPortraitBrowsing)
+        }
+    }
+
+    /// Whether the iPhone Duo tabletop layout mirrors the video into the lower
+    /// half as a dim reflection below the hinge. Default is `true`.
+    var tabletopReflection: Bool {
+        get {
+            if let cached = _tabletopReflection { return cached }
+            return bool(for: .tabletopReflection, default: true)
+        }
+        set {
+            _tabletopReflection = newValue
+            set(newValue, for: .tabletopReflection)
         }
     }
     #endif

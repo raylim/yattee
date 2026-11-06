@@ -13,8 +13,59 @@ import NukeUI
 extension ExpandedPlayerSheet {
     // MARK: - Layout Constants
 
-    /// Minimum width required to show widescreen layout with floating panel.
-    static let minWidthForWidescreen: CGFloat = 700
+    /// Minimum width required for the corner layout; below this the corner
+    /// preset setting falls back to the stacked widescreen layout (Split View,
+    /// narrow windows).
+    static let minWidthForCornerLayout: CGFloat = 900
+
+    /// Minimum height (safe areas included) for the corner layout on iOS:
+    /// keeps it off tall-phone landscape (iPhone Pro Max is 956×440) while
+    /// the iPhone Duo interior (951×669) and every iPad qualify. The gate is
+    /// size-only — the Duo interior behaves like a small iPad, and the
+    /// exterior display never reaches the width. On macOS it is not a gate
+    /// but the player window's resize floor while the corner layout is on.
+    static let minHeightForCornerLayout: CGFloat = 600
+
+    /// Tabletop (foldable, hinge partially open): vertical room reserved on
+    /// the lower half for the top bar row and for the bottom bar, keeping the
+    /// center controls and side sliders clear of both.
+    static let tabletopTopBarInset: CGFloat = 72
+    static let tabletopBottomBarInset: CGFloat = 96
+    /// Book posture (hinge vertical): clearance between the hinge line and
+    /// the controls confined to the trailing half.
+    static let bookFoldHingeGap: CGFloat = 16
+
+    #if os(iOS)
+    /// Reflection strength at the hinge line; it fades to nothing at
+    /// `tabletopReflectionFadeEnd` of the mirrored video height.
+    static let tabletopReflectionOpacity: Double = 0.4
+    static let tabletopReflectionFadeEnd: CGFloat = 0.7
+    /// Softens the mirrored frames so the reflection reads as a glow, not a second video.
+    static let tabletopReflectionBlurRadius: CGFloat = 16
+
+    private var showsTabletopReflection: Bool {
+        guard appEnvironment?.settingsManager.tabletopReflection ?? true,
+              let playerState else { return false }
+        return playerState.isFirstFrameReady && playerState.isBufferReady
+            && playerState.currentStream?.isAudioOnly != true
+            && playerState.pipState != .active
+    }
+
+    /// Mirrored video frames sized like the fitted video, fading out downwards.
+    private func tabletopReflection(backend: MPVBackend, width: CGFloat, height: CGFloat) -> some View {
+        MPVReflectionView(backend: backend)
+            .frame(width: width, height: height)
+            .blur(radius: Self.tabletopReflectionBlurRadius)
+            .mask(
+                LinearGradient(
+                    colors: [.white.opacity(Self.tabletopReflectionOpacity), .clear],
+                    startPoint: .top,
+                    endPoint: UnitPoint(x: 0.5, y: Self.tabletopReflectionFadeEnd)
+                )
+            )
+            .allowsHitTesting(false)
+    }
+    #endif
 
     // MARK: - Layout Detection
 
@@ -31,89 +82,27 @@ extension ExpandedPlayerSheet {
         #endif
     }
 
-    // MARK: - Download Action Handler
-
-    #if !os(tvOS)
-    /// Handles download button action based on current state.
-    func handleDownloadAction(for video: Video) {
-        let isDownloaded = downloadManager?.isDownloaded(video.id) ?? false
-        let download = downloadManager?.download(for: video.id)
-        let isDownloading = download?.status == .downloading || download?.status == .queued
-
-        if isDownloading, let download {
-            Task {
-                await downloadManager?.cancel(download)
-            }
-        } else if isDownloaded {
-            showingDeleteDownloadAlert = true
-        } else {
-            startDownload(for: video)
-        }
+    #if os(iOS) || os(macOS)
+    /// Whether the corner layout should be used for the given size: opted into
+    /// via the preset's panel settings, large enough (iPad, macOS, iPhone Duo
+    /// interior), and in a widescreen orientation. Evaluated per layout pass
+    /// so window resizes and Split View changes fall back automatically.
+    /// `size` must include the safe areas so the status bar toggling with the
+    /// layout can't feed back into the decision.
+    func isCornerLayout(size: CGSize) -> Bool {
+        playerControlsLayout.effectivePanelSettings.effectiveLayoutMode == .corner
+            && cornerLayoutFits(size: size)
     }
 
-    /// Starts a download either automatically or by showing the quality sheet.
-    private func startDownload(for video: Video) {
-        guard let appEnvironment else {
-            showingDownloadSheet = true
-            return
-        }
-
-        // Media source videos (SMB/WebDAV/local) use direct file URLs - no API call needed
-        if video.isFromMediaSource {
-            Task {
-                do {
-                    try await appEnvironment.downloadManager.autoEnqueueMediaSource(
-                        video,
-                        mediaSourcesManager: appEnvironment.mediaSourcesManager,
-                        webDAVClient: appEnvironment.webDAVClient,
-                        smbClient: appEnvironment.smbClient
-                    )
-                } catch {
-                    appEnvironment.toastManager.show(
-                        category: .error,
-                        title: String(localized: "download.error.title"),
-                        subtitle: error.localizedDescription,
-                        icon: "exclamationmark.triangle",
-                        iconColor: .red
-                    )
-                }
-            }
-            return
-        }
-
-        let downloadSettings = appEnvironment.downloadSettings
-
-        // Check if auto-download mode
-        if downloadSettings.preferredDownloadQuality != .ask,
-           let instance = appEnvironment.instancesManager.instance(for: video) {
-            Task {
-                do {
-                    try await appEnvironment.downloadManager.autoEnqueue(
-                        video,
-                        preferredQuality: downloadSettings.preferredDownloadQuality,
-                        preferredAudioLanguage: appEnvironment.settingsManager.preferredAudioLanguage,
-                        preferredSubtitlesLanguage: appEnvironment.settingsManager.preferredSubtitlesLanguage,
-                        includeSubtitles: downloadSettings.includeSubtitlesInAutoDownload,
-                        contentService: appEnvironment.contentService,
-                        instance: instance
-                    )
-                } catch {
-                    appEnvironment.toastManager.show(
-                        category: .error,
-                        title: String(localized: "download.error.title"),
-                        subtitle: error.localizedDescription,
-                        icon: "exclamationmark.triangle",
-                        iconColor: .red
-                    )
-                }
-            }
-        } else {
-            showingDownloadSheet = true
-        }
+    /// The size half of `isCornerLayout(size:)`, independent of the preset's
+    /// layout mode.
+    func cornerLayoutFits(size: CGSize) -> Bool {
+        #if os(iOS)
+        guard size.height >= Self.minHeightForCornerLayout else { return false }
+        #endif
+        return size.width >= Self.minWidthForCornerLayout
+            && isWideScreenLayout(size: size)
     }
-    #else
-    /// No-op on tvOS.
-    func handleDownloadAction(for video: Video) {}
     #endif
 
     // MARK: - Standard/Portrait Layout
@@ -130,9 +119,16 @@ extension ExpandedPlayerSheet {
         // Full screen size including safe areas (for portrait fullscreen)
         let safeAreaInsets = geometry.safeAreaInsets
         let fullScreenHeight = max(1, contentHeight + safeAreaInsets.top + safeAreaInsets.bottom)
+        // Displays with a vertical status bar (iPhone Duo exterior) inset the
+        // content horizontally too. With the panel hidden the video and the
+        // controls layer span the full width and shift under the leading
+        // inset, mirroring `fullscreenPlayerOffset` vertically; the controls
+        // pad their edges by the window's horizontal safe area themselves.
+        let fullScreenWidth = max(1, contentWidth + safeAreaInsets.leading + safeAreaInsets.trailing)
         // Use content size for layout, full screen size for portrait fullscreen controls
         let screenHeight = contentHeight
-        let screenWidth = contentWidth
+        let screenWidth = isPortraitPanelVisible ? contentWidth : fullScreenWidth
+        let fullscreenPlayerXOffset: CGFloat = isPortraitPanelVisible ? 0 : -safeAreaInsets.leading
 
         // Reserve minimum space for panel when pinned
         // Dynamic height based on description content
@@ -145,13 +141,14 @@ extension ExpandedPlayerSheet {
 
         // Check if expanded comments pill will be visible (needs extra panel height)
         let pillSettings = playerControlsLayout.effectivePlayerPillSettings
+        let commentsPillMode = playerControlsLayout.effectivePanelSettings.commentsPillMode
         let hasCommentsPill = playerState?.commentsState == .loaded &&
             !(playerState?.comments.isEmpty ?? true) &&
-            pillSettings.shouldShowCommentsPill
+            commentsPillMode != .disabled
         let hasExpandedCommentsPill = hasCommentsPill &&
             pillSettings.visibility.isVisible(isWideLayout: false) &&
             !pillSettings.buttons.isEmpty &&
-            !pillSettings.isCommentsPillAlwaysCollapsed
+            !commentsPillMode.alwaysCollapsed
 
         let minPanelHeight: CGFloat = useCompactPanel ? 150 : 200
         // When compact panel but expanded comments pill visible, need taller panel (~250pt)
@@ -159,26 +156,43 @@ extension ExpandedPlayerSheet {
 
         let maxVideoHeight = max(1, screenHeight - minPanelHeight)
 
+        // Tabletop (foldable hinge partially open, panel hidden): the upper
+        // half of the screen is the video area, the lower half holds every
+        // control. `layoutHeight` replaces the full screen height wherever the
+        // fullscreen video is fitted and positioned.
+        #if os(iOS)
+        let isHingeSplit = isTabletopHinge
+        let isTabletop = isTabletopHinge && !isPortraitPanelVisible
+        #else
+        let isHingeSplit = false
+        let isTabletop = false
+        #endif
+        let layoutHeight = isTabletop ? fullScreenHeight / 2 : fullScreenHeight
+
         // Calculate fit size (aspect-fit within screen bounds, but capped to show panel)
         let fitHeightFromWidth = screenWidth / aspectRatio
         let fitWidthFromHeight = screenHeight * aspectRatio
         let uncappedFitHeight: CGFloat = fitHeightFromWidth > screenHeight ? screenHeight : fitHeightFromWidth
         let uncappedFitWidth: CGFloat = fitHeightFromWidth > screenHeight ? fitWidthFromHeight : screenWidth
 
-        // Apply max height constraint to leave space for panel
-        let fitHeight = max(1, min(uncappedFitHeight, maxVideoHeight))
+        // Apply max height constraint to leave space for panel (or to the
+        // upper half while the hinge is partially open, panel shown or not)
+        let fitHeightCap = isHingeSplit ? min(maxVideoHeight, fullScreenHeight / 2) : maxVideoHeight
+        let fitHeight = max(1, min(uncappedFitHeight, fitHeightCap))
         let fitWidth = max(1, fitHeight < uncappedFitHeight ? fitHeight * aspectRatio : uncappedFitWidth)
 
         // Calculate fullscreen fit size (aspect-fit within full screen including safe areas)
         let fullscreenFitHeightFromWidth = screenWidth / aspectRatio
-        let fullscreenFitHeight: CGFloat = max(1, fullscreenFitHeightFromWidth > fullScreenHeight ? fullScreenHeight : fullscreenFitHeightFromWidth)
+        let fullscreenFitHeight: CGFloat = max(1, fullscreenFitHeightFromWidth > layoutHeight ? layoutHeight : fullscreenFitHeightFromWidth)
 
-        // Calculate fill size (aspect-fill to cover screen)
-        let fillHeight: CGFloat = max(1, fitHeightFromWidth >= screenHeight ? fitHeightFromWidth : screenHeight)
-        let fillWidth: CGFloat = max(1, fitHeightFromWidth >= screenHeight ? screenWidth : fitWidthFromHeight)
+        // Calculate fill size (aspect-fill to cover the video area: the whole
+        // screen, or the upper half in tabletop)
+        let fillAreaHeight = isTabletop ? layoutHeight : screenHeight
+        let fillHeight: CGFloat = max(1, fitHeightFromWidth >= fillAreaHeight ? fitHeightFromWidth : fillAreaHeight)
+        let fillWidth: CGFloat = max(1, fitHeightFromWidth >= fillAreaHeight ? screenWidth : fillAreaHeight * aspectRatio)
 
         #if os(iOS)
-        // Use UIKit pinch gesture panscan from NavigationCoordinator
+        // Use UIKit pinch gesture panscan from NavigationCoordinator.
         let panscan = !isPortraitPanelVisible ? (navigationCoordinator?.pinchPanscan ?? 0.0) : 0.0
         #else
         let panscan = 0.0
@@ -195,11 +209,14 @@ extension ExpandedPlayerSheet {
 
         // Calculate player height - animates between fit and fullscreen
         // Use full screen height when panel is hidden for immersive controls
-        let playerHeight = !isPortraitPanelVisible ? fullScreenHeight : fitHeight
+        let playerHeight = !isPortraitPanelVisible ? layoutHeight : fitHeight
 
         // Panel height when pinned (capped by maxPanelHeight for widescreen videos without description)
         let naturalPanelHeight = screenHeight - fitHeight
-        let pinnedPanelHeight = min(naturalPanelHeight, maxPanelHeight)
+        // Hinge partially open: the panel takes the whole lower half, its top
+        // edge on the hinge, so the video keeps the upper half either way.
+        let hingeY = fullScreenHeight / 2 - safeAreaInsets.top
+        let pinnedPanelHeight = isHingeSplit ? max(1, screenHeight - hingeY) : min(naturalPanelHeight, maxPanelHeight)
         let pillsOverlayOpacity: CGFloat = {
             guard isPanelDragging, panelDragOffset > 0 else { return 1 }
             let fadeDistance: CGFloat = 48
@@ -216,8 +233,27 @@ extension ExpandedPlayerSheet {
         //
         // videoYOffset is a @State that we animate explicitly for smooth drag release animation.
         // Base positions are computed, then videoYOffset is added.
-        let topY = videoAreaHeight / 2  // Video centered in video area (above panel)
-        let centerY = screenHeight / 2  // Video centered when panel hidden
+        // Video center when the panel is hidden, in content-area coordinates:
+        // full-screen center shifted up by the top safe area. NOT screenHeight/2 —
+        // top and bottom insets differ (the player window adds extra bottom
+        // inset), so animating to screenHeight/2 and then flipping to the hidden
+        // base position causes a visible jump of (bottom - top) / 2 points.
+        //
+        // Tabletop: the hidden position is the center of the upper half. This
+        // must follow the hinge, not `isTabletop` (which is false while the
+        // panel is visible): dragging the panel down interpolates the video
+        // towards this point, and using the full-screen center there moved
+        // the video down during the drag, only to snap it back up once the
+        // hidden state flipped to the half-height layout.
+        #if os(iOS)
+        let hiddenLayoutHeight = isTabletopHinge ? fullScreenHeight / 2 : fullScreenHeight
+        #else
+        let hiddenLayoutHeight = fullScreenHeight
+        #endif
+        let hiddenVideoY = hiddenLayoutHeight / 2 - safeAreaInsets.top
+        // Video centered in video area (above panel). Hinge split: the same
+        // spot as with the panel hidden, so toggling the panel never moves it.
+        let topY = isHingeSplit ? hiddenVideoY : videoAreaHeight / 2
 
         let videoY: CGFloat = {
             if isPortraitPanelVisible {
@@ -228,10 +264,10 @@ extension ExpandedPlayerSheet {
                 if panelRevealOffset < 0 {
                     // Revealing panel - move video towards top
                     let revealProgress = min(1.0, -panelRevealOffset / pinnedPanelHeight)
-                    return centerY - (centerY - topY) * revealProgress
+                    return hiddenVideoY - (hiddenVideoY - topY) * revealProgress
                 }
                 // Fullscreen: fill entire screen (need to offset for safe area)
-                return fullScreenHeight / 2 + fullscreenPlayerOffset
+                return hiddenVideoY
             }
         }()
 
@@ -242,7 +278,7 @@ extension ExpandedPlayerSheet {
             videoWidth: videoWidth,
             videoHeight: videoHeight,
             screenWidth: screenWidth,
-            screenHeight: fullScreenHeight,
+            screenHeight: layoutHeight,
             isFullscreen: !isPortraitPanelVisible,
             showControls: false,
             activeLayout: playerControlsLayout
@@ -283,12 +319,18 @@ extension ExpandedPlayerSheet {
             // When panel visible: video fills the controls area (0 to fitHeight)
             // When fullscreen: video centered on full screen
             // During drag: expand videoAreaHeight so bottom bar moves down with panel
-            videoAreaTop: isPortraitPanelVisible ? 0 : (fullScreenHeight - fullscreenFitHeight) / 2,
-            videoAreaHeight: isPortraitPanelVisible ? draggedControlsHeight : fullscreenFitHeight,
+            // Tabletop: the controls' "video area" is the lower half so the
+            // center controls, sliders and top bar all land below the hinge.
+            // The center zone excludes the top bar row and the bottom bar so
+            // the side sliders don't collide with either.
+            videoAreaTop: isTabletop ? layoutHeight + Self.tabletopTopBarInset : (isPortraitPanelVisible ? 0 : (fullScreenHeight - fullscreenFitHeight) / 2),
+            videoAreaHeight: isTabletop ? layoutHeight - Self.tabletopTopBarInset - Self.tabletopBottomBarInset : (isPortraitPanelVisible ? draggedControlsHeight : fullscreenFitHeight),
             // Pass stable fitHeight for slider sizing (doesn't change during drag)
             // Panel visible or dragging: use fitHeight for stable sizing
             // Fullscreen (after drag completes): pass nil so sliders use geometry.size.height
-            videoFitHeight: (isPortraitPanelVisible || isPanelDragging) ? fitHeight : nil,
+            videoFitHeight: isTabletop ? layoutHeight : ((isPortraitPanelVisible || isPanelDragging) ? fitHeight : nil),
+            isTabletop: isTabletop,
+            horizontalSafeArea: (safeAreaInsets.leading, safeAreaInsets.trailing),
             activeLayout: playerControlsLayout
         )
         .frame(width: screenWidth, height: draggedControlsHeight)
@@ -300,10 +342,29 @@ extension ExpandedPlayerSheet {
 
             // Player positioned based on panel state
             playerView
-                .position(x: screenWidth / 2, y: videoY)
+                .position(x: screenWidth / 2 + fullscreenPlayerXOffset, y: videoY)
                 // Animate video position when not dragging (matches panel animation behavior)
                 .animation(isPanelDragging ? nil : .spring(response: 0.3, dampingFraction: 1.0), value: videoYOffset)
                 .animation(panelRevealOffset != 0 ? nil : .spring(response: 0.3, dampingFraction: 1.0), value: isPortraitPanelVisible)
+
+            #if os(iOS)
+            // Tabletop: mirror the video across the hinge line into the lower
+            // half, like a screen standing on a glossy table. The mirrored
+            // frames come from the render view; this only places and fades them.
+            // Clipped to the lower half: a filled (panscanned) video is taller
+            // than the upper half, and its mirror would otherwise spill back
+            // over the hinge onto the video itself.
+            if isTabletop, showsTabletopReflection,
+               let backend = playerService?.currentBackend as? MPVBackend {
+                let hingeY = layoutHeight - safeAreaInsets.top
+                tabletopReflection(backend: backend, width: videoWidth, height: videoHeight)
+                    .position(x: screenWidth / 2 + fullscreenPlayerXOffset, y: hingeY - videoY)
+                    .frame(width: screenWidth, height: layoutHeight)
+                    .clipped()
+                    .position(x: screenWidth / 2, y: hingeY + layoutHeight / 2)
+                    .transition(.opacity)
+            }
+            #endif
 
             // Controls layer - positioned based on panel state
             // When panel visible: positioned to cover from top down to panel
@@ -318,7 +379,7 @@ extension ExpandedPlayerSheet {
                     // Position exactly like playerView - at videoY with same offset
                     // This ensures controls y=0 aligns with screen y=0
                     controlsLayer
-                        .position(x: screenWidth / 2, y: fullScreenHeight / 2 + fullscreenPlayerOffset)
+                        .position(x: screenWidth / 2 + fullscreenPlayerXOffset, y: fullScreenHeight / 2 + fullscreenPlayerOffset)
                 }
             }
             // Reveal gesture - swipe up to show panel when hidden (simultaneous so taps still work for controls)
@@ -365,9 +426,10 @@ extension ExpandedPlayerSheet {
                                     panelRevealOffset = 0
                                     isPortraitPanelVisible = true
                                     navigationCoordinator?.isPortraitPanelVisible = true
+                                    appEnvironment?.settingsManager.portraitDetailsPanelLastVisible = true
                                     // Match video position from reveal formula
                                     let revealProgress = min(1.0, -currentRevealOffset / pinnedPanelHeight)
-                                    let maxVideoOffset = centerY - topY
+                                    let maxVideoOffset = hiddenVideoY - topY
                                     videoYOffset = maxVideoOffset * (1.0 - revealProgress)
                                 }
 
@@ -443,8 +505,8 @@ extension ExpandedPlayerSheet {
                                         // Dragging DOWN - existing dismiss logic
                                         panelDragOffset = offset
                                         panelExpandOffset = 0
-                                        // Calculate video offset: interpolate from 0 to (centerY - topY) based on drag
-                                        let maxOffset = centerY - topY
+                                        // Calculate video offset: interpolate from 0 to (hiddenVideoY - topY) based on drag
+                                        let maxOffset = hiddenVideoY - topY
                                         let dragProgress = min(1.0, offset / pinnedPanelHeight)
                                         videoYOffset = maxOffset * dragProgress
                                     }
@@ -454,7 +516,7 @@ extension ExpandedPlayerSheet {
                                 let dismissThreshold: CGFloat = 80
                                 let expandThreshold: CGFloat = -80  // Upward threshold
                                 let targetOffset = pinnedPanelHeight + safeAreaInsets.bottom
-                                let maxVideoOffset = centerY - topY
+                                let maxVideoOffset = hiddenVideoY - topY
 
                                 // Setting isPanelDragging = false activates the .animation modifiers
                                 isPanelDragging = false
@@ -478,21 +540,25 @@ extension ExpandedPlayerSheet {
                                     panelDragOffset = 0
                                     videoYOffset = 0
                                 } else if offset > dismissThreshold || predictedOffset > dismissThreshold * 2 {
-                                    // Dismissing - animate panel sliding off and video to center
-                                    panelDragOffset = targetOffset
-                                    videoYOffset = maxVideoOffset
-                                    // Hide after animation completes - disable animations for cleanup
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                    // Dismissing - animate panel sliding off and video to center.
+                                    // The hidden-state flip must wait for the spring to finish:
+                                    // a fixed-delay timer fired mid-animation and snapped the
+                                    // video the rest of the way (visible jump on release).
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 1.0), completionCriteria: .logicallyComplete) {
+                                        panelDragOffset = targetOffset
+                                        videoYOffset = maxVideoOffset
+                                    } completion: {
                                         var transaction = Transaction()
                                         transaction.disablesAnimations = true
                                         withTransaction(transaction) {
                                             isPortraitPanelVisible = false
                                             navigationCoordinator?.isPortraitPanelVisible = false
+                                            appEnvironment?.settingsManager.portraitDetailsPanelLastVisible = false
                                             isCommentsExpanded = false
                                             navigationCoordinator?.isCommentsExpanded = false
                                             navigationCoordinator?.commentsFrame = .zero
                                             panelDragOffset = 0
-                                            videoYOffset = 0  // Reset offset (centerY is now the base)
+                                            videoYOffset = 0  // Reset offset (hiddenVideoY is now the base)
                                         }
                                     }
                                 } else {
@@ -510,6 +576,17 @@ extension ExpandedPlayerSheet {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 1.0)) {
                                     panelDragOffset = 0
                                     panelExpandOffset = 0
+                                    videoYOffset = 0
+                                }
+                            },
+                            onRequestExpand: { [self] in
+                                // Comments pill routed to the comments page:
+                                // expand the panel to fullscreen
+                                guard !isPanelExpanded else { return }
+                                withAnimation(.spring(response: 0.3, dampingFraction: 1.0)) {
+                                    isPanelExpanded = true
+                                    panelExpandOffset = 0
+                                    panelDragOffset = 0
                                     videoYOffset = 0
                                 }
                             }
@@ -617,19 +694,7 @@ extension ExpandedPlayerSheet {
             isPortraitPanelVisible = newValue
         }
         navigationCoordinator?.isPortraitPanelVisible = newValue
-    }
-
-    /// Hide floating panel with animation
-    private func hideFloatingPanel() {
-        withAnimation(.easeInOut(duration: 0.3)) {
-            isPortraitPanelVisible = false
-        }
-        navigationCoordinator?.isPortraitPanelVisible = false
-
-        // Reset main window transform when hiding panel to fix safe area clipping (iOS only)
-        #if os(iOS)
-        ExpandedPlayerWindowManager.shared.resetMainWindowImmediate()
-        #endif
+        appEnvironment?.settingsManager.portraitDetailsPanelLastVisible = newValue
     }
 
     // MARK: - Portrait Player Area
@@ -822,6 +887,7 @@ extension ExpandedPlayerSheet {
                             isPortraitPanelVisible.toggle()
                         }
                         navigationCoordinator?.isPortraitPanelVisible = isPortraitPanelVisible
+                        appEnvironment?.settingsManager.portraitDetailsPanelLastVisible = isPortraitPanelVisible
                     },
                     onShowSettings: { [self] in
                         showingQualitySheet = true
@@ -833,7 +899,7 @@ extension ExpandedPlayerSheet {
                         await playerService.playPrevious()
                     },
                     onShowQueue: { [self] in
-                        showingQueueSheet = true
+                        presentSheet(.queue())
                     },
                     onVolumeChanged: { [weak appEnvironment] volume in
                         playerService.currentBackend?.volume = volume
@@ -933,10 +999,10 @@ extension ExpandedPlayerSheet {
                         showingQualitySheet = true
                     },
                     onShowQueue: { [self] in
-                        showingQueueSheet = true
+                        presentSheet(.queue())
                     },
                     onShowPlaylistSelector: { [self] in
-                        showingPlaylistSheet = true
+                        presentAddToPlaylist()
                     },
                     onRateChanged: { rate in
                         playerState.rate = rate
@@ -1031,11 +1097,17 @@ extension ExpandedPlayerSheet {
         videoAreaTop: CGFloat = 0,
         videoAreaHeight: CGFloat? = nil,
         videoFitHeight: CGFloat? = nil,
+        isTabletop: Bool = false,
+        horizontalSafeArea: (leading: CGFloat, trailing: CGFloat) = (0, 0),
         activeLayout: PlayerControlsLayout = .default
     ) -> some View {
         // Controls always use full screen dimensions to prevent layout shifts
         let controlsWidth = max(1, screenWidth)
         let controlsHeight = max(1, screenHeight)
+        // Tabletop: controls y=0 is the screen top, so the top bar moves just
+        // below the hinge (the center zone starts one top-bar inset lower),
+        // and the pinch-to-fill is off
+        let topBarOffset: CGFloat = isTabletop ? (videoAreaTop - Self.tabletopTopBarInset + 8) : 0
 
         #if os(iOS)
         if let backend = playerService?.currentBackend,
@@ -1094,6 +1166,7 @@ extension ExpandedPlayerSheet {
                         isPortraitPanelVisible.toggle()
                     }
                     navigationCoordinator?.isPortraitPanelVisible = isPortraitPanelVisible
+                    appEnvironment?.settingsManager.portraitDetailsPanelLastVisible = isPortraitPanelVisible
                     // Re-enable controls after animation completes (0.35s)
                     // Controls will still be hidden (forceInitialHidden) until user taps
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -1110,12 +1183,14 @@ extension ExpandedPlayerSheet {
                     await playerService.playPrevious()
                 },
                 onShowQueue: { [self] in
-                    showingQueueSheet = true
+                    presentSheet(.queue())
                 },
                 forceInitialHidden: forceHidden,
                 videoAreaTop: videoAreaTop,
                 videoAreaHeight: videoAreaHeight,
                 videoFitHeight: videoFitHeight,
+                topBarOffset: topBarOffset,
+                horizontalSafeArea: horizontalSafeArea,
                 onVolumeChanged: { [weak appEnvironment] volume in
                     playerService.currentBackend?.volume = volume
                     appEnvironment?.settingsManager.playerVolume = volume
@@ -1155,7 +1230,7 @@ extension ExpandedPlayerSheet {
                     playerService.selectEmbeddedSubtitleTrack(trackID)
                 },
                 panscanValue: navigationCoordinator?.pinchPanscan ?? 0.0,
-                isPanscanAllowed: !isPortraitPanelVisible,
+                isPanscanAllowed: !isPortraitPanelVisible && !isTabletop,
                 onTogglePanscan: { [weak navigationCoordinator] in
                     navigationCoordinator?.togglePanscan()
                 },
@@ -1213,10 +1288,10 @@ extension ExpandedPlayerSheet {
                     showingQualitySheet = true
                 },
                 onShowQueue: { [self] in
-                    showingQueueSheet = true
+                    presentSheet(.queue())
                 },
                 onShowPlaylistSelector: { [self] in
-                    showingPlaylistSheet = true
+                    presentAddToPlaylist()
                 },
                 onRateChanged: { rate in
                     playerState.rate = rate
@@ -1265,6 +1340,74 @@ extension ExpandedPlayerSheet {
         )
     }
 
+    // MARK: - Corner Content
+
+    /// Corner layout: video top-left, side column, optional below-video
+    /// region. Reuses `playerAreaForWidescreen` so the MPV hosting path is
+    /// identical to the stacked layout — only the container size differs.
+    @ViewBuilder
+    func cornerContent(video: Video) -> some View {
+        // Seed the panel visibility before the first frame: once the
+        // session's default visibility is applied the setting is the truth;
+        // until then resolve the preset's landscape default (same policy the
+        // sheet's applyPanelDefaultVisibility writes moments later).
+        let initialPanelVisible = appEnvironment?.navigationCoordinator.hasAppliedPanelDefaultVisibility == true
+            ? (appEnvironment?.settingsManager.landscapeDetailsPanelVisible ?? true)
+            : Self.initialPanelVisibility(for: .landscape, settingsManager: appEnvironment?.settingsManager)
+
+        CornerPlayerLayout(
+            playerControlsLayout: playerControlsLayout,
+            initialPanelVisible: initialPanelVisible,
+            initialColumnWidth: appEnvironment?.settingsManager.cornerPanelColumnWidth,
+            playerContent: { onTogglePanel, isPanelVisible, width, height in
+                // isPanelPinned=true keeps the controls visible alongside the
+                // panel regions (corner regions behave like a pinned panel).
+                playerAreaForWidescreen(
+                    onTogglePanel: onTogglePanel,
+                    isPanelVisible: isPanelVisible,
+                    isPanelPinned: true,
+                    panelSide: .right,
+                    onHidePanel: {},
+                    leadingSafeArea: 0,
+                    trailingSafeArea: 0,
+                    fullWidth: width,
+                    fullHeight: height
+                )
+                #if os(iOS)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear
+                            .onChange(of: proxy.frame(in: .global), initial: true) { _, frame in
+                                navigationCoordinator?.cornerVideoFrame = frame
+                            }
+                            .onDisappear {
+                                navigationCoordinator?.cornerVideoFrame = .zero
+                            }
+                    }
+                }
+                #endif
+            },
+            onChannelTap: video.author.hasRealChannelInfo ? {
+                navigationCoordinator?.navigateToChannel(for: video, collapsePlayer: true)
+            } : nil,
+            onFullscreen: {
+                #if os(iOS)
+                self.toggleFullscreen()
+                #endif
+            },
+            isHingeSplit: isHingeSplitActive
+        )
+    }
+
+    /// The corner layout splits on the hinge while it's partially open.
+    private var isHingeSplitActive: Bool {
+        #if os(iOS)
+        isTabletopHinge
+        #else
+        false
+        #endif
+    }
+
     // MARK: - Widescreen Player Area
 
     /// Player area for widescreen layout with panel support.
@@ -1298,6 +1441,21 @@ extension ExpandedPlayerSheet {
 
         // Calculate offset for controls positioning (used for animation)
         let controlsOffset = (leadingSafeArea - trailingSafeArea) / 2
+
+        #if os(iOS)
+        // Foldable in book posture (hinge partially open, landscape, the
+        // player spanning the fold): the buttons move to the trailing half so
+        // nothing sits on the hinge; dimming and taps still cover the whole
+        // screen. The corner layout's hinge split with panels shown already
+        // gives the player one half only.
+        let bookFoldButtonsInset: CGFloat = {
+            guard isTabletopHinge,
+                  fullWidth > fullHeight,
+                  fullWidth >= Self.minWidthForCornerLayout else { return 0 }
+            // Controls frame starts at the leading safe area
+            return max(0, fullWidth / 2 + Self.bookFoldHingeGap - leadingSafeArea)
+        }()
+        #endif
 
         // Calculate video frame size based on panscan
         // At panscan 0: aspect-fit (may have black bars)
@@ -1416,7 +1574,6 @@ extension ExpandedPlayerSheet {
                     }
                 }
                 .frame(width: videoWidth, height: videoHeight)
-                .matchedGeometryEffect(id: "player", in: playerNamespace)
                 .geometryGroup()
                 .clipped()
 
@@ -1483,8 +1640,7 @@ extension ExpandedPlayerSheet {
                     isPanelVisible: isPanelVisible,
                     panelSide: panelSide,
                     isPanelPinned: isPanelPinned,
-                    layoutLeadingSafeArea: 0.01, // Non-zero indicates safe areas handled externally
-                    layoutTrailingSafeArea: 0.01,
+                    isCornerLayout: appEnvironment?.navigationCoordinator.isCornerLayoutActive == true,
                     onToggleOrientationLock: { [weak appEnvironment] in
                         appEnvironment?.settingsManager.inAppOrientationLock.toggle()
                     },
@@ -1499,7 +1655,7 @@ extension ExpandedPlayerSheet {
                         await playerService.playPrevious()
                     },
                     onShowQueue: { [self] in
-                        showingQueueSheet = true
+                        presentSheet(.queue())
                     },
                     videoAreaTop: (availableHeight - videoHeight) / 2,
                     videoAreaHeight: videoHeight,
@@ -1543,11 +1699,15 @@ extension ExpandedPlayerSheet {
                         playerService.selectEmbeddedSubtitleTrack(trackID)
                     },
                     panscanValue: navigationCoordinator?.pinchPanscan ?? 0.0,
-                    isPanscanAllowed: !(isPanelPinned && isPanelVisible),
+                    // Corner layout: the video owns its own region, so it can
+                    // fill it even with the panels showing
+                    isPanscanAllowed: !(isPanelPinned && isPanelVisible)
+                        || appEnvironment?.navigationCoordinator.isCornerLayoutActive == true,
                     onTogglePanscan: { [weak navigationCoordinator] in
                         navigationCoordinator?.togglePanscan()
                     },
-                    activeLayout: playerControlsLayout
+                    activeLayout: playerControlsLayout,
+                    buttonsLeadingInset: bookFoldButtonsInset
                 )
                 .frame(width: availableWidth, height: availableHeight)
                 .offset(x: controlsOffset)
@@ -1562,9 +1722,7 @@ extension ExpandedPlayerSheet {
                             Text(verbatim: "fullH: \(Int(fullHeight)) offset: \(Int(controlsOffset))")
                             Text(verbatim: "pinned: \(isPanelPinned ? "Y" : "N") vis: \(isPanelVisible ? "Y" : "N") side: \(panelSide == .left ? "L" : "R")")
                             #if os(iOS)
-                            let orientation = UIApplication.shared.connectedScenes
-                                .compactMap { $0 as? UIWindowScene }
-                                .first?.interfaceOrientation
+                            let orientation = UIApplication.shared.foregroundWindowScene?.interfaceOrientation
                             Text(verbatim: "orient: \(orientation == .landscapeLeft ? "LL" : orientation == .landscapeRight ? "LR" : "P")")
                             #endif
                         }
@@ -1650,15 +1808,20 @@ extension ExpandedPlayerSheet {
                         showingQualitySheet = true
                     },
                     onShowQueue: { [self] in
-                        showingQueueSheet = true
+                        presentSheet(.queue())
                     },
                     onShowPlaylistSelector: { [self] in
-                        showingPlaylistSheet = true
+                        presentAddToPlaylist()
                     },
                     onTitleTap: {
                         onTogglePanel()
                     },
-                    isDetailsPanelVisible: isPanelVisible,
+                    // Only a floating (unpinned) panel covers the video and
+                    // takes the controls with it. Pinned and corner layout
+                    // panels sit beside the video: showing them again (e.g.
+                    // the restore after native fullscreen) must not leave the
+                    // controls hidden with hover unable to bring them back.
+                    isDetailsPanelVisible: isPanelVisible && !isPanelPinned,
                     onRateChanged: { rate in
                         playerState.rate = rate
                         playerService.currentBackend?.rate = Float(rate.rawValue)

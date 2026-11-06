@@ -10,9 +10,6 @@ import SwiftUI
 struct EditSourceView: View {
     let source: UnifiedSource
 
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.appEnvironment) private var appEnvironment
-
     var body: some View {
         switch source {
         case .remoteServer(let instance):
@@ -36,6 +33,10 @@ private struct EditRemoteServerContent: View {
     @State private var allowInvalidCertificates: Bool
     @State private var proxiesVideos: Bool
 
+    // Piped serves its API and web frontend from separate hosts; browser-facing
+    // actions (open in browser, copy link) use this URL when set.
+    @State private var frontendURLString: String
+
     // HTTP Basic Auth credentials (for any instance type behind a reverse proxy;
     // required for Yattee Server, optional for Invidious/Piped/PeerTube).
     @State private var basicAuthUsername: String = ""
@@ -44,8 +45,9 @@ private struct EditRemoteServerContent: View {
     /// "user cleared the fields" and delete the stored credentials on save.
     @State private var hadStoredBasicAuth: Bool = false
 
-    // Invidious login state
-    @State private var showLoginSheet = false
+    // Account login state. `loginTarget` is non-nil while the sheet is up and
+    // carries the account being signed into — nil inside it means "create one".
+    @State private var loginTarget: AccountLoginTarget?
     @State private var isLoggedIn = false
 
     // Yattee Server validation
@@ -65,6 +67,7 @@ private struct EditRemoteServerContent: View {
         _isEnabled = State(initialValue: instance.isEnabled)
         _allowInvalidCertificates = State(initialValue: instance.allowInvalidCertificates)
         _proxiesVideos = State(initialValue: instance.proxiesVideos)
+        _frontendURLString = State(initialValue: instance.frontendURL?.absoluteString ?? "")
     }
 
     var body: some View {
@@ -120,36 +123,24 @@ private struct EditRemoteServerContent: View {
                 #endif
             }
 
-            if instance.supportsHTTPBasicAuthProxy {
+            if instance.type == .piped {
                 Section {
                     #if os(tvOS)
-                    TVSettingsTextField(title: String(localized: "sources.field.username"), text: $basicAuthUsername)
-                    TVSettingsTextField(title: String(localized: "sources.field.password"), text: $basicAuthPassword, isSecure: true)
+                    TVSettingsTextField(title: String(localized: "sources.field.frontendURL"), text: $frontendURLString)
                     #elseif os(macOS)
-                    LabeledContent(String(localized: "sources.field.username")) {
-                        TextField("", text: $basicAuthUsername)
-                            .textContentType(.username)
+                    LabeledContent(String(localized: "sources.field.frontendURL")) {
+                        TextField("", text: $frontendURLString)
                             .autocorrectionDisabled()
                     }
-                    LabeledContent(String(localized: "sources.field.password")) {
-                        SecureField("", text: $basicAuthPassword)
-                            .textContentType(.password)
-                    }
                     #else
-                    TextField(String(localized: "sources.field.username"), text: $basicAuthUsername)
-                        .textContentType(.username)
-                        #if os(iOS)
+                    TextField(String(localized: "sources.field.frontendURL"), text: $frontendURLString)
+                        .textContentType(.URL)
+                        .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
-                        #endif
                         .autocorrectionDisabled()
-
-                    SecureField(String(localized: "sources.field.password"), text: $basicAuthPassword)
-                        .textContentType(.password)
                     #endif
-                } header: {
-                    Text(String(localized: instance.type == .yatteeServer ? "sources.header.auth" : "sources.header.basicAuth"))
                 } footer: {
-                    Text(String(localized: instance.type == .yatteeServer ? "sources.footer.yatteeServerAuth" : "sources.footer.basicAuth"))
+                    Text(String(localized: "sources.footer.frontendURL"))
                 }
             }
 
@@ -196,72 +187,51 @@ private struct EditRemoteServerContent: View {
             }
 
             if instance.supportsAuthentication {
-                Section {
-                    if isLoggedIn {
-                        Button(role: .destructive) {
-                            logout()
-                        } label: {
-                            Label(String(localized: "login.logout"), systemImage: "rectangle.portrait.and.arrow.forward")
-                        }
-                        #if os(tvOS)
-                        .buttonStyle(TVSettingsButtonStyle())
-                        #endif
-                    } else {
-                        Button {
-                            showLoginSheet = true
-                        } label: {
-                            Label(String(localized: "login.loginToAccount"), systemImage: "person.badge.key")
-                        }
-                        #if os(tvOS)
-                        .buttonStyle(TVSettingsButtonStyle())
-                        #endif
-                    }
-                } header: {
-                    Text(String(localized: "login.header.account"))
-                } footer: {
-                    if isLoggedIn {
-                        Text(String(localized: "login.footer.loggedIn"))
-                    } else {
-                        Text(String(localized: "login.footer.loginBenefits"))
-                    }
-                }
+                InstanceAccountsSection(instance: instance, loginTarget: $loginTarget)
 
-                // Import section - show when logged in for Invidious and Piped instances
-                if isLoggedIn && (instance.type == .invidious || instance.type == .piped) {
+                // Import section - each entry offered only where the backend
+                // has something to import from.
+                if isLoggedIn,
+                   instance.type.accountCapabilities.supportsSubscriptions
+                   || instance.type.accountCapabilities.supportsPlaylistReads {
                     Section {
-                        NavigationLink {
-                            #if os(tvOS)
-                            TVSidebarDetailContainer(
-                                systemImage: "person.2",
-                                title: String(localized: "sources.import.subscriptions"),
-                                showsDismissButton: true
-                            ) {
+                        if instance.type.accountCapabilities.supportsSubscriptions {
+                            NavigationLink {
+                                #if os(tvOS)
+                                TVSidebarDetailContainer(
+                                    systemImage: "person.2",
+                                    title: String(localized: "sources.import.subscriptions"),
+                                    showsDismissButton: true
+                                ) {
+                                    ImportSubscriptionsView(instance: instance)
+                                }
+                                #else
                                 ImportSubscriptionsView(instance: instance)
+                                #endif
+                            } label: {
+                                Label(String(localized: "sources.import.subscriptions"), systemImage: "person.2")
                             }
-                            #else
-                            ImportSubscriptionsView(instance: instance)
-                            #endif
-                        } label: {
-                            Label(String(localized: "sources.import.subscriptions"), systemImage: "person.2")
+                            .accessibilityIdentifier("sources.import.subscriptions")
                         }
-                        .accessibilityIdentifier("sources.import.subscriptions")
 
-                        NavigationLink {
-                            #if os(tvOS)
-                            TVSidebarDetailContainer(
-                                systemImage: "list.bullet.rectangle",
-                                title: String(localized: "sources.import.playlists"),
-                                showsDismissButton: true
-                            ) {
+                        if instance.type.accountCapabilities.supportsPlaylistReads {
+                            NavigationLink {
+                                #if os(tvOS)
+                                TVSidebarDetailContainer(
+                                    systemImage: "list.bullet.rectangle",
+                                    title: String(localized: "sources.import.playlists"),
+                                    showsDismissButton: true
+                                ) {
+                                    ImportPlaylistsView(instance: instance)
+                                }
+                                #else
                                 ImportPlaylistsView(instance: instance)
+                                #endif
+                            } label: {
+                                Label(String(localized: "sources.import.playlists"), systemImage: "list.bullet.rectangle")
                             }
-                            #else
-                            ImportPlaylistsView(instance: instance)
-                            #endif
-                        } label: {
-                            Label(String(localized: "sources.import.playlists"), systemImage: "list.bullet.rectangle")
+                            .accessibilityIdentifier("sources.import.playlists")
                         }
-                        .accessibilityIdentifier("sources.import.playlists")
                     } header: {
                         Text(String(localized: "sources.header.import"))
                     }
@@ -269,6 +239,33 @@ private struct EditRemoteServerContent: View {
             }
 
             Section {
+                if instance.supportsHTTPBasicAuthProxy {
+                    #if os(tvOS)
+                    TVSettingsTextField(title: String(localized: "sources.field.username"), text: $basicAuthUsername)
+                    TVSettingsTextField(title: String(localized: "sources.field.password"), text: $basicAuthPassword, isSecure: true)
+                    #elseif os(macOS)
+                    LabeledContent(String(localized: "sources.field.username")) {
+                        TextField("", text: $basicAuthUsername)
+                            .textContentType(.username)
+                            .autocorrectionDisabled()
+                    }
+                    LabeledContent(String(localized: "sources.field.password")) {
+                        SecureField("", text: $basicAuthPassword)
+                            .textContentType(.password)
+                    }
+                    #else
+                    TextField(String(localized: "sources.field.username"), text: $basicAuthUsername)
+                        .textContentType(.username)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .autocorrectionDisabled()
+
+                    SecureField(String(localized: "sources.field.password"), text: $basicAuthPassword)
+                        .textContentType(.password)
+                    #endif
+                }
+
                 #if os(tvOS)
                 TVSettingsToggle(
                     title: String(localized: "sources.field.allowInvalidCertificates"),
@@ -280,7 +277,13 @@ private struct EditRemoteServerContent: View {
             } header: {
                 Text(String(localized: "sources.header.security"))
             } footer: {
-                Text(String(localized: "sources.footer.allowInvalidCertificates"))
+                if instance.supportsHTTPBasicAuthProxy {
+                    Text(String(localized: instance.type == .yatteeServer ? "sources.footer.yatteeServerAuth" : "sources.footer.basicAuth"))
+                    + Text(verbatim: "\n\n")
+                    + Text(String(localized: "sources.footer.allowInvalidCertificates"))
+                } else {
+                    Text(String(localized: "sources.footer.allowInvalidCertificates"))
+                }
             }
 
             if instance.supportsVideoProxying {
@@ -335,31 +338,36 @@ private struct EditRemoteServerContent: View {
             titleVisibility: .visible
         ) {
             Button(String(localized: "common.delete"), role: .destructive) {
-                appEnvironment?.instancesManager.remove(instance)
+                appEnvironment?.removeInstance(instance)
                 dismiss()
             }
             Button(String(localized: "common.cancel"), role: .cancel) {}
+        } message: {
+            // Deleting a source has always taken its logins with it; only the
+            // question was silent about it.
+            if let accounts = InstanceDeletionDisclosure.message(for: instance, in: appEnvironment) {
+                Text(accounts)
+            }
         }
         .presentationCompactAdaptation(.sheet)
-        #if os(tvOS)
-        .fullScreenCover(isPresented: $showLoginSheet) {
-            InstanceLoginView(instance: instance) { credential in
-                appEnvironment?.credentialsManager(for: instance)?.setCredential(credential, for: instance)
-                appEnvironment?.instancesManager.setUsesAccountLogin(true, for: instance)
-                isLoggedIn = true
+        .platformSheet(item: $loginTarget) { target in
+            InstanceLoginView(instance: instance, initialUsername: storedUsername(for: target)) { credential, username in
+                storeLogin(credential: credential, username: username, target: target)
             }
         }
-        #else
-        .sheet(isPresented: $showLoginSheet) {
-            InstanceLoginView(instance: instance) { credential in
-                appEnvironment?.credentialsManager(for: instance)?.setCredential(credential, for: instance)
-                appEnvironment?.instancesManager.setUsesAccountLogin(true, for: instance)
-                isLoggedIn = true
-            }
+        // Signing out happens in the accounts section below, which cannot reach
+        // this state directly. Without this the authenticated import actions
+        // stay on screen after the last account is removed, and then fail.
+        .onReceive(NotificationCenter.default.publisher(for: .accountsDidChange)) { _ in
+            isLoggedIn = appEnvironment?.isSignedIn(to: instance) ?? false
         }
-        #endif
+        // A credential arriving over iCloud Keychain changes only the status,
+        // and the authenticated import actions depend on it.
+        .onReceive(NotificationCenter.default.publisher(for: .accountStatusesDidChange)) { _ in
+            isLoggedIn = appEnvironment?.isSignedIn(to: instance) ?? false
+        }
         .onAppear {
-            isLoggedIn = appEnvironment?.credentialsManager(for: instance)?.isLoggedIn(for: instance) ?? false
+            isLoggedIn = appEnvironment?.isSignedIn(to: instance) ?? false
 
             // Load existing HTTP Basic Auth credentials (works for any instance type)
             if let credentials = appEnvironment?.basicAuthCredentialsManager.credentials(for: instance) {
@@ -389,10 +397,6 @@ private struct EditRemoteServerContent: View {
 
     // MARK: - Computed Properties
 
-    private var hasYatteeServer: Bool {
-        appEnvironment?.instancesManager.hasYatteeServerInstances ?? false
-    }
-
     private func invidiousDisplayValue(_ info: InstanceDetectorModels.YatteeServerFullInfo) -> String {
         guard let invidiousInstance = info.config?.invidiousInstance else {
             return String(localized: "sources.serverInfo.notConfigured")
@@ -409,10 +413,26 @@ private struct EditRemoteServerContent: View {
 
     // MARK: - Actions
 
-    private func logout() {
-        appEnvironment?.credentialsManager(for: instance)?.deleteCredential(for: instance)
-        appEnvironment?.instancesManager.setUsesAccountLogin(false, for: instance)
-        isLoggedIn = false
+    /// Files a successful login against an account, and reflects it in the
+    /// authenticated actions this sheet shows.
+    @discardableResult
+    private func storeLogin(credential: String, username: String, target: AccountLoginTarget) -> Bool {
+        guard let appEnvironment else { return false }
+
+        let stored = AccountSignInHandler(appEnvironment: appEnvironment, instance: instance)
+            .storeLogin(credential: credential, username: username, target: target)
+
+        if stored {
+            isLoggedIn = true
+        }
+        return stored
+    }
+
+    /// The identifier an existing account last signed in with, when this device
+    /// holds it. A new account has nobody to name yet.
+    private func storedUsername(for target: AccountLoginTarget) -> String? {
+        guard let account = target.account else { return nil }
+        return appEnvironment?.accountCredentialsManager(for: account)?.username(for: account)
     }
 
     private func loadServerInfo() async {
@@ -455,6 +475,11 @@ private struct EditRemoteServerContent: View {
         updated.isEnabled = isEnabled
         updated.allowInvalidCertificates = allowInvalidCertificates
         updated.proxiesVideos = proxiesVideos
+
+        if instance.type == .piped {
+            let trimmed = frontendURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+            updated.frontendURL = trimmed.isEmpty ? nil : Instance.normalizeSourceURL(trimmed)
+        }
 
         // Save / clear HTTP Basic Auth credentials. Yattee Server never auto-clears
         // (credentials are required and the user re-enters to overwrite). Piped never

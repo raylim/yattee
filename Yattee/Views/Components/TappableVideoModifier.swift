@@ -7,18 +7,12 @@
 
 import SwiftUI
 
-/// Data for the resume action sheet, used with sheet(item:) to ensure data availability.
-struct ResumeSheetData: Identifiable {
-    let id = UUID()
-    let video: Video
-    let resumeTime: TimeInterval
-}
-
 /// View modifier that wraps content in a button that plays a video when tapped.
-/// When queue is enabled and not empty, shows a sheet with queue options.
-/// When queue is empty or disabled, plays the video directly and queues subsequent videos.
+/// When queue is enabled and a video is playing or queued, shows a sheet with queue options.
+/// When nothing is playing or queue is disabled, plays the video directly and queues subsequent videos.
 struct TappableVideoModifier: ViewModifier {
     @Environment(\.appEnvironment) private var appEnvironment
+    @Environment(\.presentAppSheet) private var presentAppSheet
 
     let video: Video
     var startTime: Double? = nil
@@ -37,22 +31,21 @@ struct TappableVideoModifier: ViewModifier {
     /// Callback to load more videos via continuation
     nonisolated(unsafe) var loadMoreVideos: LoadMoreVideosCallback? = nil
 
-    @State private var showingQueueSheet = false
-
-    // Resume action sheet state - using item-based sheet to ensure data is available when presented
-    @State private var resumeSheetData: ResumeSheetData? = nil
-
     // Password alert state (for WebDAV sources)
     @State private var showingPasswordAlert = false
     @State private var sourceNeedingPassword: MediaSource?
     @State private var passwordInput = ""
 
-    /// Whether queue feature is enabled and queue has items
+    /// Whether queue feature is enabled and something is playing or queued,
+    /// so "Play Next" / "Add to Queue" are meaningful alternatives to replacing playback.
     private var shouldShowQueueSheet: Bool {
         guard let env = appEnvironment else { return false }
         let queueEnabled = env.settingsManager.queueEnabled
-        let queueHasItems = !env.playerService.state.queue.isEmpty
-        return queueEnabled && queueHasItems
+        let state = env.playerService.state
+        // A video that played to the end no longer counts: replacing it loses nothing.
+        let hasUnfinishedVideo = state.currentVideo != nil && state.playbackState != .ended
+        let hasActivePlayback = hasUnfinishedVideo || !state.queue.isEmpty
+        return queueEnabled && hasActivePlayback
     }
 
     func body(content: Content) -> some View {
@@ -81,17 +74,6 @@ struct TappableVideoModifier: ViewModifier {
                 customActions: customActions,
                 context: context,
                 startTime: startTime
-            )
-        }
-        .sheet(isPresented: $showingQueueSheet) {
-            QueueActionSheet(video: video, queueSource: queueSource)
-        }
-        .sheet(item: $resumeSheetData) { data in
-            ResumeActionSheet(
-                video: data.video,
-                resumeTime: data.resumeTime,
-                onContinue: { playVideoWithStartTime(data.resumeTime) },
-                onStartOver: { playVideoWithStartTime(0) }
             )
         }
         .alert(String(localized: "common.authenticationRequired"), isPresented: $showingPasswordAlert) {
@@ -144,7 +126,7 @@ struct TappableVideoModifier: ViewModifier {
             sourceNeedingPassword = source
             showingPasswordAlert = true
         } else if shouldShowQueueSheet {
-            showingQueueSheet = true
+            presentAppSheet(.queueAction(video, queueSource: queueSource))
         } else {
             playVideoAndQueueRest()
         }
@@ -159,7 +141,7 @@ struct TappableVideoModifier: ViewModifier {
         
         // Now check if we should show queue sheet or play directly
         if shouldShowQueueSheet {
-            showingQueueSheet = true
+            presentAppSheet(.queueAction(video, queueSource: queueSource))
         } else {
             playVideoAndQueueRest()
         }
@@ -208,7 +190,12 @@ struct TappableVideoModifier: ViewModifier {
                 playVideoWithStartTime(0)
             case .ask:
                 // Show the resume action sheet with data bundled together
-                resumeSheetData = ResumeSheetData(video: video, resumeTime: savedProgress)
+                presentAppSheet(.resumeAction(
+                    video,
+                    resumeTime: savedProgress,
+                    onContinue: { playVideoWithStartTime(savedProgress) },
+                    onStartOver: { playVideoWithStartTime(0) }
+                ))
             }
         } else {
             // No saved progress or video was completed - play from beginning

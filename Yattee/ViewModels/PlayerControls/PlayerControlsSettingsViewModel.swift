@@ -16,7 +16,6 @@ final class PlayerControlsSettingsViewModel {
     // MARK: - Dependencies
 
     private let layoutService: PlayerControlsLayoutService
-    let settingsManager: SettingsManager
 
     /// Observer for preset changes from CloudKit sync.
     @ObservationIgnored private var presetsChangedObserver: NSObjectProtocol?
@@ -54,12 +53,6 @@ final class PlayerControlsSettingsViewModel {
         activePreset?.id
     }
 
-    /// Whether the active preset can be deleted (not built-in and not active).
-    var canDeleteActivePreset: Bool {
-        guard let activePreset else { return false }
-        return !activePreset.isBuiltIn
-    }
-
     /// Whether the active preset can be edited (not built-in).
     var canEditActivePreset: Bool {
         guard let activePreset else { return false }
@@ -74,16 +67,6 @@ final class PlayerControlsSettingsViewModel {
     /// Current center section settings for observation.
     var centerSettings: CenterSectionSettings {
         activePreset?.layout.centerSettings ?? .default
-    }
-
-    /// Seek backward seconds - exposed for direct observation.
-    var seekBackwardSeconds: Int {
-        activePreset?.layout.centerSettings.seekBackwardSeconds ?? 10
-    }
-
-    /// Seek forward seconds - exposed for direct observation.
-    var seekForwardSeconds: Int {
-        activePreset?.layout.centerSettings.seekForwardSeconds ?? 10
     }
 
     /// Current progress bar settings.
@@ -101,15 +84,6 @@ final class PlayerControlsSettingsViewModel {
         presets.filter { !$0.isBuiltIn }.sorted { $0.name < $1.name }
     }
 
-    /// Button types that are new since last seen.
-    var newButtonTypes: [ControlButtonType] {
-        Task.detached { [layoutService] in
-            await layoutService.newButtonTypes()
-        }
-        // Return empty for now; actual implementation will load async
-        return []
-    }
-
     // MARK: - Initialization
 
     init(
@@ -117,7 +91,6 @@ final class PlayerControlsSettingsViewModel {
         settingsManager: SettingsManager
     ) {
         self.layoutService = layoutService
-        self.settingsManager = settingsManager
 
         // Observe preset changes from CloudKit sync
         presetsChangedObserver = NotificationCenter.default.addObserver(
@@ -204,13 +177,6 @@ final class PlayerControlsSettingsViewModel {
         LoggingService.shared.info("Selected preset: \(preset.name)")
     }
 
-    /// Selects a preset by ID.
-    /// - Parameter id: The ID of the preset to activate.
-    func selectPreset(id: UUID) {
-        guard let preset = presets.first(where: { $0.id == id }) else { return }
-        selectPreset(preset)
-    }
-
     // MARK: - Preset Management
 
     /// Creates a new custom preset with the given name.
@@ -290,30 +256,6 @@ final class PlayerControlsSettingsViewModel {
 
     // MARK: - Layout Editing
 
-    /// Updates the top section of the current layout.
-    /// - Parameter section: The new top section configuration.
-    func updateTopSection(_ section: LayoutSection) async {
-        await updateLayout { layout in
-            layout.topSection = section
-        }
-    }
-
-    /// Updates the bottom section of the current layout.
-    /// - Parameter section: The new bottom section configuration.
-    func updateBottomSection(_ section: LayoutSection) async {
-        await updateLayout { layout in
-            layout.bottomSection = section
-        }
-    }
-
-    /// Updates the center settings of the current layout.
-    /// - Parameter settings: The new center section settings.
-    func updateCenterSettings(_ settings: CenterSectionSettings) async {
-        await updateLayout { layout in
-            layout.centerSettings = settings
-        }
-    }
-
     /// Synchronously updates center settings with immediate UI feedback.
     /// Saves are debounced to avoid rapid disk writes.
     /// - Parameter mutation: A closure that mutates the center settings.
@@ -336,14 +278,6 @@ final class PlayerControlsSettingsViewModel {
 
         // Queue debounced save
         queueDebouncedSave(preset: preset)
-    }
-
-    /// Updates the global settings of the current layout.
-    /// - Parameter settings: The new global settings.
-    func updateGlobalSettings(_ settings: GlobalLayoutSettings) async {
-        await updateLayout { layout in
-            layout.globalSettings = settings
-        }
     }
 
     /// Synchronously updates global settings with immediate UI feedback.
@@ -382,21 +316,6 @@ final class PlayerControlsSettingsViewModel {
         queueDebouncedSave(preset: preset)
     }
 
-    /// Updates a button configuration in the specified section.
-    /// - Parameters:
-    ///   - config: The updated button configuration.
-    ///   - section: The section containing the button.
-    func updateButtonConfiguration(_ config: ControlButtonConfiguration, in section: LayoutSectionType) async {
-        await updateLayout { layout in
-            switch section {
-            case .top:
-                layout.topSection.update(button: config)
-            case .bottom:
-                layout.bottomSection.update(button: config)
-            }
-        }
-    }
-
     /// Synchronously updates a button configuration with immediate UI feedback.
     /// Saves are debounced to avoid rapid disk writes.
     /// - Parameters:
@@ -420,22 +339,6 @@ final class PlayerControlsSettingsViewModel {
 
         // Queue debounced save
         queueDebouncedSave(preset: preset)
-    }
-
-    /// Adds a button to the specified section.
-    /// - Parameters:
-    ///   - buttonType: The type of button to add.
-    ///   - section: The section to add the button to.
-    func addButton(_ buttonType: ControlButtonType, to section: LayoutSectionType) async {
-        await updateLayout { layout in
-            let config = ControlButtonConfiguration.defaultConfiguration(for: buttonType)
-            switch section {
-            case .top:
-                layout.topSection.add(button: config)
-            case .bottom:
-                layout.bottomSection.add(button: config)
-            }
-        }
     }
 
     /// Synchronously adds a button with immediate UI feedback.
@@ -462,21 +365,6 @@ final class PlayerControlsSettingsViewModel {
         queueDebouncedSave(preset: preset)
     }
 
-    /// Removes a button from the specified section.
-    /// - Parameters:
-    ///   - buttonID: The ID of the button to remove.
-    ///   - section: The section containing the button.
-    func removeButton(_ buttonID: UUID, from section: LayoutSectionType) async {
-        await updateLayout { layout in
-            switch section {
-            case .top:
-                layout.topSection.remove(id: buttonID)
-            case .bottom:
-                layout.bottomSection.remove(id: buttonID)
-            }
-        }
-    }
-
     /// Synchronously removes a button with immediate UI feedback.
     /// - Parameters:
     ///   - buttonID: The ID of the button to remove.
@@ -498,22 +386,6 @@ final class PlayerControlsSettingsViewModel {
         self.activePreset = preset
 
         queueDebouncedSave(preset: preset)
-    }
-
-    /// Moves a button within a section.
-    /// - Parameters:
-    ///   - source: Source indices.
-    ///   - destination: Destination index.
-    ///   - section: The section containing the buttons.
-    func moveButton(fromOffsets source: IndexSet, toOffset destination: Int, in section: LayoutSectionType) async {
-        await updateLayout { layout in
-            switch section {
-            case .top:
-                layout.topSection.move(fromOffsets: source, toOffset: destination)
-            case .bottom:
-                layout.bottomSection.move(fromOffsets: source, toOffset: destination)
-            }
-        }
     }
 
     /// Synchronously moves a button with immediate UI feedback.
@@ -623,42 +495,6 @@ final class PlayerControlsSettingsViewModel {
     /// Current pill buttons configuration.
     var pillButtons: [ControlButtonConfiguration] {
         playerPillSettings.buttons
-    }
-
-    /// Current comments pill mode.
-    var commentsPillMode: CommentsPillMode {
-        playerPillSettings.effectiveCommentsPillMode
-    }
-
-    /// Synchronously updates the comments pill mode with immediate UI feedback.
-    /// - Parameter mode: The new comments pill mode.
-    func syncCommentsPillMode(_ mode: CommentsPillMode) {
-        updatePlayerPillSettingsSync { settings in
-            settings.commentsPillMode = mode
-        }
-    }
-
-    // MARK: - Wide Layout Panel Settings
-
-    /// Current wide layout panel alignment from active preset, or default.
-    var wideLayoutPanelAlignment: FloatingPanelSide {
-        activePreset?.layout.effectiveWideLayoutPanelAlignment ?? .right
-    }
-
-    /// Synchronously updates the wide layout panel alignment with immediate UI feedback.
-    /// - Parameter alignment: The new panel alignment.
-    func syncWideLayoutPanelAlignment(_ alignment: FloatingPanelSide) {
-        guard var preset = activePreset, !preset.isBuiltIn else {
-            error = "Cannot edit built-in presets. Duplicate it first."
-            return
-        }
-
-        var layout = preset.layout
-        layout.wideLayoutPanelAlignment = alignment
-        preset = preset.withUpdatedLayout(layout)
-        self.activePreset = preset
-
-        queueDebouncedSave(preset: preset)
     }
 
     /// Synchronously updates the pill visibility with immediate UI feedback.
@@ -813,6 +649,163 @@ final class PlayerControlsSettingsViewModel {
         queueDebouncedSave(preset: preset)
     }
 
+    // MARK: - Details Panel Settings
+
+    /// Current details panel settings from active preset, or default.
+    var panelSettings: PanelSettings {
+        activePreset?.layout.effectivePanelSettings ?? .default
+    }
+
+    /// Ordered pages list for the settings UI (includes disabled pages).
+    var panelPages: [PanelPageConfiguration] {
+        panelSettings.normalizedPages
+    }
+
+    /// Number of enabled panel pages.
+    var enabledPanelPageCount: Int {
+        panelSettings.enabledPages().count
+    }
+
+    /// Current default panel visibility for an orientation.
+    func panelDefaultVisibility(for orientation: PanelOrientation) -> PanelDefaultVisibility {
+        panelSettings.effectiveDefaultVisibility(for: orientation)
+    }
+
+    /// Synchronously updates the default panel visibility for an orientation.
+    func syncPanelDefaultVisibility(_ visibility: PanelDefaultVisibility, for orientation: PanelOrientation) {
+        updatePanelSettingsSync { settings in
+            settings.setDefaultVisibility(visibility, for: orientation)
+        }
+    }
+
+    /// Current panel layout mode (iPad/macOS).
+    var panelLayoutMode: PanelLayoutMode {
+        panelSettings.effectiveLayoutMode
+    }
+
+    /// Synchronously updates the panel layout mode.
+    func syncPanelLayoutMode(_ mode: PanelLayoutMode) {
+        updatePanelSettingsSync { settings in
+            settings.layoutMode = mode
+        }
+    }
+
+    /// Current panel side in the standard wide layout (iPad/macOS).
+    var panelWideLayoutSide: FloatingPanelSide {
+        panelSettings.effectiveWideLayoutSide
+    }
+
+    /// Synchronously updates the panel side in the standard wide layout.
+    func syncPanelWideLayoutSide(_ side: FloatingPanelSide) {
+        updatePanelSettingsSync { settings in
+            settings.wideLayoutSide = side
+        }
+    }
+
+    /// What the corner layout shows below the video (stored value).
+    var panelBelowVideoContent: PanelBelowVideoContent {
+        panelSettings.belowVideoContent
+    }
+
+    /// Synchronously updates what the corner layout shows below the video.
+    func syncPanelBelowVideoContent(_ content: PanelBelowVideoContent) {
+        updatePanelSettingsSync { settings in
+            settings.belowVideoContent = content
+        }
+    }
+
+    /// Enables or disables a panel page. The last enabled page cannot be
+    /// disabled — the panel always needs at least one page.
+    func setPanelPageEnabled(_ pageType: PanelPageType, isEnabled: Bool) {
+        updatePanelSettingsSync { settings in
+            settings.setEnabled(isEnabled, for: pageType)
+        }
+    }
+
+    /// Reorders the pages a settings list displays; offsets are relative to
+    /// `visible` (see `PanelSettings.moveVisiblePages`).
+    func movePanelPages(visible: [PanelPageType], fromOffsets source: IndexSet, toOffset destination: Int) {
+        updatePanelSettingsSync { settings in
+            settings.moveVisiblePages(visible, fromOffsets: source, toOffset: destination)
+        }
+    }
+
+    /// Synchronously updates the info page element toggles.
+    func updatePanelInfoSettingsSync(_ mutation: (inout InfoPageSettings) -> Void) {
+        updatePanelSettingsSync { settings in
+            var info = settings.configuration(for: .info)?.infoSettings ?? InfoPageSettings()
+            mutation(&info)
+            settings.updateSettings(.info(info), for: .info)
+        }
+    }
+
+    /// Synchronously updates the comments page element toggles.
+    func updatePanelCommentsSettingsSync(_ mutation: (inout CommentsPageSettings) -> Void) {
+        updatePanelSettingsSync { settings in
+            var comments = settings.configuration(for: .comments)?.commentsSettings ?? CommentsPageSettings()
+            mutation(&comments)
+            settings.updateSettings(.comments(comments), for: .comments)
+        }
+    }
+
+    /// Synchronously updates the related page element toggles.
+    func updatePanelRelatedSettingsSync(_ mutation: (inout RelatedPageSettings) -> Void) {
+        updatePanelSettingsSync { settings in
+            var related = settings.configuration(for: .related)?.relatedSettings ?? RelatedPageSettings()
+            mutation(&related)
+            settings.updateSettings(.related(related), for: .related)
+        }
+    }
+
+    /// Synchronously updates the chapters page element toggles.
+    func updatePanelChaptersSettingsSync(_ mutation: (inout ChaptersPageSettings) -> Void) {
+        updatePanelSettingsSync { settings in
+            var chapters = settings.configuration(for: .chapters)?.chaptersSettings ?? ChaptersPageSettings()
+            mutation(&chapters)
+            settings.updateSettings(.chapters(chapters), for: .chapters)
+        }
+    }
+
+    /// Synchronously updates the queue page element toggles.
+    func updatePanelQueueSettingsSync(_ mutation: (inout QueuePageSettings) -> Void) {
+        updatePanelSettingsSync { settings in
+            var queue = settings.configuration(for: .queue)?.queueSettings ?? QueuePageSettings()
+            mutation(&queue)
+            settings.updateSettings(.queue(queue), for: .queue)
+        }
+    }
+
+    /// Whether the page bar shows labels next to icons.
+    var panelShowPageBarLabels: Bool {
+        panelSettings.effectiveShowPageBarLabels
+    }
+
+    /// Synchronously updates the page bar labels setting.
+    func syncPanelShowPageBarLabels(_ showLabels: Bool) {
+        updatePanelSettingsSync { settings in
+            settings.showPageBarLabels = showLabels
+        }
+    }
+
+    /// Synchronously updates details panel settings with immediate UI feedback.
+    /// Saves are debounced to avoid rapid disk writes.
+    /// - Parameter mutation: A closure that mutates the panel settings.
+    func updatePanelSettingsSync(_ mutation: (inout PanelSettings) -> Void) {
+        guard var preset = activePreset, !preset.isBuiltIn else {
+            error = "Cannot edit built-in presets. Duplicate it first."
+            return
+        }
+
+        var layout = preset.layout
+        var settings = layout.effectivePanelSettings
+        mutation(&settings)
+        layout.panelSettings = settings
+        preset = preset.withUpdatedLayout(layout)
+        self.activePreset = preset
+
+        queueDebouncedSave(preset: preset)
+    }
+
     // MARK: - System Controls & Volume
 
     /// Current system controls mode from active preset, or default.
@@ -853,32 +846,6 @@ final class PlayerControlsSettingsViewModel {
 
     // MARK: - Private Helpers
 
-    /// Updates the layout and saves to storage.
-    /// - Parameter mutation: A closure that mutates the layout.
-    private func updateLayout(_ mutation: (inout PlayerControlsLayout) -> Void) async {
-        guard let activePreset, !activePreset.isBuiltIn else {
-            error = "Cannot edit built-in presets. Duplicate it first."
-            return
-        }
-
-        var layout = activePreset.layout
-        mutation(&layout)
-
-        // Update local state immediately for responsive UI
-        self.activePreset = activePreset.withUpdatedLayout(layout)
-
-        // Save to storage
-        isSaving = true
-        do {
-            try await layoutService.updatePresetLayout(activePreset.id, layout: layout)
-            await refreshPresets()
-        } catch {
-            self.error = error.localizedDescription
-            LoggingService.shared.error("Failed to save layout: \(error.localizedDescription)")
-        }
-        isSaving = false
-    }
-
     /// Queues a debounced save operation.
     /// Cancels any pending save and waits before persisting to avoid rapid disk writes.
     /// - Parameter preset: The preset to save.
@@ -899,21 +866,6 @@ final class PlayerControlsSettingsViewModel {
             }
             isSaving = false
         }
-    }
-
-    // MARK: - NEW Badge Support
-
-    /// Marks all button types as seen, hiding NEW badges.
-    func markAllButtonsAsSeen() async {
-        await layoutService.markAllButtonsAsSeen()
-    }
-
-    /// Returns whether a button type should show the NEW badge.
-    /// - Parameter type: The button type to check.
-    /// - Returns: True if the button was added after the last seen version.
-    func isNewButton(_ type: ControlButtonType) async -> Bool {
-        let newTypes = await layoutService.newButtonTypes()
-        return newTypes.contains(type)
     }
 
     // MARK: - Error Handling

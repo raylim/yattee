@@ -51,6 +51,9 @@ struct Video: Identifiable, Codable, Sendable {
     /// Related/recommended videos (populated from video details API).
     let relatedVideos: [Video]?
 
+    /// Whether this is a YouTube Short: `nil` when the source can't tell.
+    let isShort: Bool?
+
     // MARK: - Explicit Initializer
 
     init(
@@ -67,7 +70,8 @@ struct Video: Identifiable, Codable, Sendable {
         isLive: Bool,
         isUpcoming: Bool,
         scheduledStartTime: Date?,
-        relatedVideos: [Video]? = nil
+        relatedVideos: [Video]? = nil,
+        isShort: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -83,6 +87,71 @@ struct Video: Identifiable, Codable, Sendable {
         self.isUpcoming = isUpcoming
         self.scheduledStartTime = scheduledStartTime
         self.relatedVideos = relatedVideos
+        self.isShort = isShort
+    }
+
+    // MARK: - Standing in for metadata
+
+    /// A video that is nothing but its own ID, for a list that knows a video was
+    /// watched before it knows anything else about it.
+    ///
+    /// An account's server-side history is a list of IDs; the rows have to be
+    /// on screen while their metadata is still being fetched, and one whose
+    /// fetch fails is still part of that history.
+    static func metadataPlaceholder(for videoID: String) -> Video {
+        Video(
+            id: .global(videoID),
+            title: videoID,
+            description: nil,
+            author: Author(id: "", name: ""),
+            duration: 0,
+            publishedAt: nil,
+            publishedText: nil,
+            viewCount: nil,
+            likeCount: nil,
+            thumbnails: [],
+            isLive: false,
+            isUpcoming: false,
+            scheduledStartTime: nil
+        )
+    }
+
+    /// The same standing-in video under wording that says the metadata could
+    /// not be fetched, for a row whose fetch has definitively failed.
+    ///
+    /// Only what is shown changes: the video handed to the player and the queue
+    /// keeps its ID, which is the part that plays.
+    static func metadataUnavailable(for videoID: String, title: String) -> Video {
+        Video(
+            id: .global(videoID),
+            title: title,
+            description: nil,
+            author: Author(id: "", name: ""),
+            duration: 0,
+            publishedAt: nil,
+            publishedText: nil,
+            viewCount: nil,
+            likeCount: nil,
+            thumbnails: [],
+            isLive: false,
+            isUpcoming: false,
+            scheduledStartTime: nil
+        )
+    }
+
+    /// Whether a "Hide Shorts" filter should drop this video: only when the
+    /// source said it is a Short, never when it couldn't tell.
+    var isKnownShort: Bool {
+        isShort == true
+    }
+
+    /// Whether the title is only the video's own ID standing in for one.
+    ///
+    /// Anything showing this video beside details it fetched itself should
+    /// prefer the fetched title: a bare ID is not a name anybody chose, and the
+    /// screen would otherwise keep it under a real description and thumbnail.
+    var hasPlaceholderTitle: Bool {
+        title == id.videoID
     }
 
     // MARK: - Computed Properties
@@ -131,8 +200,13 @@ struct Video: Identifiable, Codable, Sendable {
     }
 
     /// Formatted published date, preferring parsed Date over API-provided text.
+    ///
+    /// A date that would render as "in 0 seconds" is shown as nothing at all:
+    /// it is what an instance sends in place of an upload date it does not
+    /// have, and the metadata line is better one segment short than wrong.
     var formattedPublishedDate: String? {
         if let publishedAt {
+            guard !RelativeDateFormatter.isEffectivelyNow(publishedAt) else { return nil }
             let formatter = RelativeDateTimeFormatter()
             formatter.unitsStyle = .full
             return formatter.localizedString(for: publishedAt, relativeTo: Date())
@@ -429,17 +503,40 @@ extension Video {
 // MARK: - Equatable & Hashable
 
 extension Video: Equatable {
-    /// Custom Equatable implementation that only compares by ID for performance.
-    /// Two videos with the same ID are considered equal during SwiftUI diffing.
-    /// This avoids expensive comparisons of all properties (including nested Author and [Thumbnail]).
+    /// Compares what the video *is*, not only which video it is.
+    ///
+    /// Being the same video is not the same as being the same *description* of
+    /// it. One ID can arrive first as a placeholder standing in for metadata
+    /// nobody has fetched yet and again as the real thing, and SwiftUI decides
+    /// whether a view needs redrawing by comparing the values it was given — so
+    /// equality by ID alone leaves a list showing the placeholder it was handed
+    /// first, however many times it is given the answer.
+    ///
+    /// The ID is compared first, which is what nearly every comparison differs
+    /// in and settles it in one step.
     static func == (lhs: Video, rhs: Video) -> Bool {
         lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.author == rhs.author
+            && lhs.duration == rhs.duration
+            && lhs.viewCount == rhs.viewCount
+            && lhs.likeCount == rhs.likeCount
+            && lhs.publishedAt == rhs.publishedAt
+            && lhs.publishedText == rhs.publishedText
+            && lhs.isLive == rhs.isLive
+            && lhs.isUpcoming == rhs.isUpcoming
+            && lhs.scheduledStartTime == rhs.scheduledStartTime
+            && lhs.thumbnails == rhs.thumbnails
+            && lhs.description == rhs.description
+            && lhs.relatedVideos == rhs.relatedVideos
+            && lhs.isShort == rhs.isShort
     }
 }
 
 extension Video: Hashable {
-    /// Custom Hashable implementation consistent with Equatable.
-    /// Only hashes the ID since equality is determined by ID alone.
+    /// Hashed by ID alone, which stays coarser than equality on purpose: it is
+    /// what every lookup is by, and hashing equal for values that turn out to
+    /// differ is exactly what a hash is allowed to do.
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }

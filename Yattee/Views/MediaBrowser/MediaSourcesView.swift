@@ -31,9 +31,16 @@ struct MediaSourcesView: View {
         appEnvironment?.sourcesSettings
     }
 
+    /// Whether there is nothing here at all — not merely nothing switched on.
+    ///
+    /// A user whose only source is disabled has sources; offering them the
+    /// "add your first source" screen would be wrong, and would hide the one
+    /// control that gets them back.
     private var isEmpty: Bool {
         (instancesManager?.enabledInstances.isEmpty ?? true) &&
-        (mediaSourcesManager?.enabledSources.isEmpty ?? true)
+        (mediaSourcesManager?.enabledSources.isEmpty ?? true) &&
+        disabledInstances.isEmpty &&
+        disabledMediaSources.isEmpty
     }
 
     private var listStyle: VideoListStyle {
@@ -127,6 +134,13 @@ struct MediaSourcesView: View {
                 pendingDeleteInstance = nil
                 pendingDeleteSource = nil
             }
+        } message: {
+            // The same cascade runs from here as from Settings, so the same
+            // logins go with it — this dialog was simply the one still silent
+            // about it.
+            if let accounts = deleteConfirmationAccounts {
+                Text(accounts)
+            }
         }
         #if !os(tvOS)
         .presentationCompactAdaptation(.sheet)
@@ -163,9 +177,14 @@ struct MediaSourcesView: View {
         return String(localized: "sources.delete.confirmation")
     }
 
+    private var deleteConfirmationAccounts: String? {
+        guard let instance = pendingDeleteInstance else { return nil }
+        return InstanceDeletionDisclosure.message(for: instance, in: appEnvironment)
+    }
+
     private func confirmDelete() {
         if let instance = pendingDeleteInstance {
-            instancesManager?.remove(instance)
+            appEnvironment?.removeInstance(instance)
             pendingDeleteInstance = nil
         }
         if let source = pendingDeleteSource {
@@ -209,6 +228,8 @@ struct MediaSourcesView: View {
                             // Grouped by type (default)
                             groupedSourcesSections
                         }
+
+                        disabledSourcesSection
                     }
                 }
             )
@@ -377,6 +398,131 @@ struct MediaSourcesView: View {
         #endif
     }
 
+    // MARK: - Disabled Sources
+
+    /// The sources switched off, and the way back on.
+    ///
+    /// Every listing above is filtered to what is enabled, so switching a
+    /// source off makes it vanish from the only screen that browses it — and
+    /// the toggle that undoes it lives several taps away in Settings. This
+    /// section is that toggle, kept at the bottom where it stays out of the way
+    /// until it is the thing being looked for.
+    @ViewBuilder
+    private var disabledSourcesSection: some View {
+        let instances = disabledInstances
+        let sources = disabledMediaSources
+
+        if !instances.isEmpty || !sources.isEmpty {
+            sectionHeader(String(localized: "sources.status.disabled"))
+                .accessibilityIdentifier("sources.disabledSection")
+
+            sectionCard {
+                ForEach(Array(instances.enumerated()), id: \.element.id) { index, instance in
+                    disabledRow(
+                        name: instance.displayName,
+                        detail: "\(instance.type.displayName) - \(instance.url.host ?? instance.url.absoluteString)",
+                        systemImage: instance.type.systemImage,
+                        isLast: sources.isEmpty && index == instances.count - 1
+                    ) {
+                        instancesManager?.toggleEnabled(instance)
+                    }
+                }
+
+                ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
+                    disabledRow(
+                        name: source.name,
+                        detail: "\(source.type.displayName) - \(source.urlDisplayString)",
+                        systemImage: source.type.systemImage,
+                        isLast: index == sources.count - 1
+                    ) {
+                        mediaSourcesManager?.toggleEnabled(source)
+                    }
+                }
+            }
+
+            Text(String(localized: "sources.disabled.footer"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                #if os(macOS)
+                .padding(.horizontal, 16)
+                #else
+                .padding(.horizontal, listStyle == .inset ? 32 : 16)
+                #endif
+                .padding(.bottom, 16)
+        }
+    }
+
+    /// Oldest first, matching the order every other listing settles into.
+    private var disabledInstances: [Instance] {
+        (instancesManager?.instances ?? [])
+            .filter { !$0.isEnabled }
+            .sorted { $0.dateAdded < $1.dateAdded }
+    }
+
+    private var disabledMediaSources: [MediaSource] {
+        (mediaSourcesManager?.sources ?? [])
+            .filter { !$0.isEnabled }
+            .sorted { $0.dateAdded < $1.dateAdded }
+    }
+
+    /// A source that is off: dimmed, and tappable only to turn it back on.
+    private func disabledRow(
+        name: String,
+        detail: String,
+        systemImage: String,
+        isLast: Bool,
+        enable: @escaping () -> Void
+    ) -> some View {
+        #if os(tvOS)
+        let rowSpacing: CGFloat = 24
+        #else
+        let rowSpacing: CGFloat = 12
+        #endif
+        #if os(macOS)
+        let iconFont: Font = .title3
+        let iconFrameWidth: CGFloat = 24
+        let titleFont: Font = .body
+        #else
+        let iconFont: Font = .title2
+        let iconFrameWidth: CGFloat = 32
+        let titleFont: Font = .headline
+        #endif
+
+        return SourceListRow(isLast: isLast, listStyle: listStyle) {
+            Button(action: enable) {
+                HStack(spacing: rowSpacing) {
+                    Image(systemName: systemImage)
+                        .font(iconFont)
+                        .foregroundStyle(.secondary)
+                        .frame(width: iconFrameWidth)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(name)
+                            .font(titleFont)
+                            .foregroundStyle(.secondary)
+
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Spacer()
+
+                    Label(String(localized: "sources.enable"), systemImage: "power")
+                        .font(.caption)
+                        .foregroundStyle(.tint)
+                }
+                .contentShape(Rectangle())
+            }
+            #if os(macOS)
+            .buttonStyle(.plain)
+            #else
+            .foregroundStyle(.primary)
+            #endif
+        }
+    }
+
     @ViewBuilder
     private func instancesSectionContent(_ instances: [Instance], firstIsGlobalFirst: Bool = false) -> some View {
         ForEach(Array(instances.enumerated()), id: \.element.id) { index, instance in
@@ -524,11 +670,7 @@ struct MediaSourcesView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if needsCredentials(instance) {
-                    Label(String(localized: "sources.status.authRequired"), systemImage: "key.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
+                instanceStatusView(for: instance)
             }
 
             Spacer()
@@ -540,6 +682,42 @@ struct MediaSourcesView: View {
             #endif
         }
         .contentShape(Rectangle())
+    }
+
+    /// What is wrong with this source, said once.
+    ///
+    /// A refused login comes first: it names one thing the user has to do, and
+    /// two warnings stacked on one row say less than either alone. Reading the
+    /// status here also puts this row inside the observation of
+    /// `AccountsManager.accountStatuses`, so a verdict arriving from the API
+    /// layer redraws it.
+    @ViewBuilder
+    private func instanceStatusView(for instance: Instance) -> some View {
+        if hasRejectedAccount(instance) {
+            Label(
+                AccountStatusBadge.text(for: .credentialRejected),
+                systemImage: "person.crop.circle.badge.exclamationmark"
+            )
+            .font(.caption2)
+            .foregroundStyle(AccountStatusBadge.color(for: .credentialRejected))
+        } else if needsCredentials(instance) {
+            Label(String(localized: "sources.status.authRequired"), systemImage: "key.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    /// Whether one of this instance's logins is being refused by the server.
+    ///
+    /// `needsCredentials` only knows whether a secret is *there*, so a
+    /// credential the server has started refusing looks perfectly healthy to
+    /// it — and this is the screen the user browses their sources from.
+    private func hasRejectedAccount(_ instance: Instance) -> Bool {
+        guard let accountsManager = appEnvironment?.accountsManager else { return false }
+
+        return accountsManager.accounts(forInstance: instance.id).contains {
+            accountsManager.status(for: $0.id) == .credentialRejected
+        }
     }
 
     private func mediaSourceRow(_ source: MediaSource, needsPassword: Bool) -> some View {

@@ -11,6 +11,7 @@ import NukeUI
 #if os(iOS) || os(macOS)
 struct MiniPlayerView: View {
     @Environment(\.appEnvironment) private var appEnvironment
+    @Environment(\.presentAppSheet) private var presentAppSheet
 
     /// Whether this is displayed as a tab bottom accessory (affects styling)
     var isTabAccessory: Bool = false
@@ -24,7 +25,6 @@ struct MiniPlayerView: View {
     private var deArrowProvider: DeArrowBrandingProvider? { appEnvironment?.deArrowBrandingProvider }
     private var queueManager: QueueManager? { appEnvironment?.queueManager }
     private var playerControlsLayoutService: PlayerControlsLayoutService? { appEnvironment?.playerControlsLayoutService }
-    private var settingsManager: SettingsManager? { appEnvironment?.settingsManager }
 
     private var currentVideo: Video? { playerState?.currentVideo }
 
@@ -47,6 +47,13 @@ struct MiniPlayerView: View {
         return isVideoReady && !isPlayerActive
     }
 
+    /// Whether the thumbnail is hidden: live video shows instead, or the
+    /// expanded player is morphing its video into this preview.
+    private var isThumbnailHidden: Bool {
+        if navigationCoordinator?.isPlayerMorphingToMini == true { return true }
+        return shouldShowVideoPreview && !isPiPActive
+    }
+
     /// Whether we should include the MPVRenderView in the hierarchy (even if hidden)
     /// During collapse, we want the view mounted so it can receive the player view immediately
     private var shouldMountVideoView: Bool {
@@ -56,7 +63,9 @@ struct MiniPlayerView: View {
         guard miniPlayerSettings.showVideo else { return false }
         // Mount when: not expanding AND (collapsing OR should show preview)
         // This ensures the container exists during collapse to receive the player view
-        return !nav.isPlayerExpanding && (nav.isPlayerCollapsing || shouldShowVideoPreview)
+        // (not while still expanded: the mini player stays mounted under the
+        // player window, and a slide-off dismiss collapses before un-expanding)
+        return !nav.isPlayerExpanding && ((nav.isPlayerCollapsing && !nav.isPlayerExpanded) || shouldShowVideoPreview)
     }
 
     /// The title to display, preferring DeArrow title if available.
@@ -130,19 +139,25 @@ struct MiniPlayerView: View {
     }
 
     var body: some View {
+        let _ = PerfCounter.body("MiniPlayerView")
         Group {
             #if os(macOS)
-            macOSCapsuleLayout
+            capsuleLayout
             #else
             if isTabAccessory {
                 accessoryLayout
             } else {
-                overlayLayout
+                capsuleLayout
             }
             #endif
         }
         .accessibilityIdentifier("player.miniPlayer")
         .accessibilityLabel("player.miniPlayer")
+        #if !os(macOS)
+        // Hidden under the expanded player: stop the scrolling titles.
+        // (macOS shows the expanded player in its own window.)
+        .environment(\.isMarqueePaused, navigationCoordinator?.isPlayerExpanded == true)
+        #endif
         .modifier(MiniPlayerContextMenuModifier(video: currentVideo) {
             closeVideo()
         })
@@ -176,6 +191,7 @@ struct MiniPlayerView: View {
             videoPreviewView
                 .frame(width: 64, height: 36)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+                .reportsMiniPlayerVideoFrame(cornerRadius: 6, navigationCoordinator: navigationCoordinator)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     handleVideoPreviewTap()
@@ -213,66 +229,27 @@ struct MiniPlayerView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Overlay Layout
+    // MARK: - Capsule Layout (macOS + iOS 18 overlay)
 
-    private var overlayLayout: some View {
-        HStack(spacing: 12) {
-            // Video preview - tap for PiP (or expand if PiP unavailable)
-            videoPreviewView
-                .frame(width: 60, height: 34)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    handleVideoPreviewTap()
-                }
-
-            // Title/author area - tap to expand player (restores from PiP first if needed)
-            VStack(alignment: .leading, spacing: 2) {
-                MarqueeText(
-                    text: displayTitle,
-                    font: .subheadline,
-                    fontWeight: .medium,
-                    foregroundStyle: .primary
-                )
-
-                authorLine(font: .caption)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                expandPlayerWithPiPRestore()
-            }
-
-            Spacer()
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    expandPlayerWithPiPRestore()
-                }
-
-            // Dynamic buttons from settings
-            buttonsView
-
-            // Always show close button in overlay layout
-            closeButton
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            progressLine
-        }
+    /// Preview size for the capsule: slightly larger on iOS for touch.
+    private var capsulePreviewSize: CGSize {
+        #if os(macOS)
+        CGSize(width: 44, height: 26)
+        #else
+        CGSize(width: 56, height: 32)
+        #endif
     }
 
-    // MARK: - macOS Capsule Layout
-
-    #if os(macOS)
-    /// Compact, centered capsule shown in the main window on macOS (Music.app style).
-    /// The expanded player lives in a separate window, so this stays visible alongside it.
-    private var macOSCapsuleLayout: some View {
+    /// Compact, centered capsule (Music.app style). On macOS it floats in the main
+    /// window alongside the separate player window; on iOS 18 (no tab accessory)
+    /// it floats above the tab bar with the same width limit.
+    private var capsuleLayout: some View {
         HStack(spacing: 10) {
             // Video preview - tap for PiP (or expand if PiP unavailable)
             videoPreviewView
-                .frame(width: 44, height: 26)
+                .frame(width: capsulePreviewSize.width, height: capsulePreviewSize.height)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
+                .reportsMiniPlayerVideoFrame(cornerRadius: 4, navigationCoordinator: navigationCoordinator)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     handleVideoPreviewTap()
@@ -289,13 +266,19 @@ struct MiniPlayerView: View {
 
                 authorLine(font: .caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture {
                 expandPlayerWithPiPRestore()
             }
 
-            // Dynamic buttons from settings (includes close by default - no separate close button)
+            // Dynamic buttons from settings (close is part of the preset)
             buttonsView
+
+            // Safety net: keep a way to close when the preset has no close button
+            if !miniPlayerSettings.buttons.contains(where: { $0.buttonType == .close }) {
+                closeButton
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -307,7 +290,6 @@ struct MiniPlayerView: View {
         .clipShape(Capsule())
         .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
     }
-    #endif
 
     // MARK: - Shared Components
 
@@ -368,14 +350,19 @@ struct MiniPlayerView: View {
             if let backend = playerService?.currentBackend as? MPVBackend,
                let playerState,
                shouldMountVideoView {
+                #if os(iOS)
+                MPVRenderViewRepresentable(backend: backend, playerState: playerState, fillsFrame: true)
+                    .allowsHitTesting(false)
+                #else
                 MPVRenderViewRepresentable(backend: backend, playerState: playerState)
                     .allowsHitTesting(false)
+                #endif
             }
 
             // Thumbnail layer - on top so it can cover the black MPV view during PiP
             // Shown when video not ready, during expand animation, or during PiP
             thumbnailView
-                .opacity(shouldShowVideoPreview && !isPiPActive ? 0 : 1)
+                .opacity(isThumbnailHidden ? 0 : 1)
                 .animation(.easeInOut(duration: 0.15), value: shouldShowVideoPreview)
                 .animation(.easeInOut(duration: 0.25), value: isPiPActive)
                 .allowsHitTesting(false)
@@ -544,7 +531,7 @@ struct MiniPlayerView: View {
     private func queueButton(config: ControlButtonConfiguration) -> some View {
         Button {
             incrementTapCount(for: config)
-            navigationCoordinator?.isMiniPlayerQueueSheetPresented = true
+            presentAppSheet(.queue(halfHeight: true))
         } label: {
             ZStack(alignment: .bottom) {
                 Image(systemName: "list.bullet")
@@ -572,7 +559,7 @@ struct MiniPlayerView: View {
     @ViewBuilder
     private func shareButton(config: ControlButtonConfiguration) -> some View {
         if let video = currentVideo {
-            ShareLink(item: video.shareURL) {
+            ShareLink(item: appEnvironment?.shareURL(for: video) ?? video.shareURL) {
                 Image(systemName: "square.and.arrow.up")
                     .font(isTabAccessory ? .title3 : .title2)
                     .frame(width: 32, height: 32)
@@ -585,7 +572,9 @@ struct MiniPlayerView: View {
     private func addToPlaylistButton(config: ControlButtonConfiguration) -> some View {
         Button {
             incrementTapCount(for: config)
-            navigationCoordinator?.isMiniPlayerPlaylistSheetPresented = true
+            if let video = appEnvironment?.playerService.state.currentVideo {
+                presentAppSheet(.addToPlaylist(video, halfHeight: true))
+            }
         } label: {
             Image(systemName: "text.badge.plus")
                 .font(isTabAccessory ? .title3 : .title2)
@@ -692,6 +681,28 @@ struct MiniPlayerView: View {
 
     private func incrementTapCount(for config: ControlButtonConfiguration) {
         buttonTapCounts[config.id, default: 0] += 1
+    }
+}
+
+// MARK: - Video Frame Reporting
+
+private extension View {
+    /// Publishes the video preview's frame as the expanded player's dismiss
+    /// morph target (iOS only; macOS's player is a separate window or overlay).
+    @ViewBuilder
+    func reportsMiniPlayerVideoFrame(cornerRadius: CGFloat, navigationCoordinator: NavigationCoordinator?) -> some View {
+        #if os(iOS)
+        onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            guard let navigationCoordinator, navigationCoordinator.miniPlayerVideoFrame != frame else { return }
+            navigationCoordinator.miniPlayerVideoFrame = frame
+            navigationCoordinator.miniPlayerVideoCornerRadius = cornerRadius
+        }
+        .onDisappear {
+            navigationCoordinator?.miniPlayerVideoFrame = .zero
+        }
+        #else
+        self
+        #endif
     }
 }
 

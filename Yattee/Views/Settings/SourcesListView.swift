@@ -128,6 +128,12 @@ struct SourcesListView: View {
                 pendingDeleteInstance = nil
                 pendingDeleteSource = nil
             }
+        } message: {
+            // Deleting a source has always taken its logins with it; only the
+            // question was silent about it.
+            if let accounts = deleteConfirmationAccounts {
+                Text(accounts)
+            }
         }
         #if !os(tvOS)
         .presentationCompactAdaptation(.sheet)
@@ -409,25 +415,31 @@ struct SourcesListView: View {
         appEnvironment?.needsCredentials(for: instance) ?? false
     }
 
+    /// Whether one of this source's logins is being refused by the server, so a
+    /// rejected login shows up where the user looks for their sources.
+    private func hasRejectedAccount(_ instance: Instance) -> Bool {
+        guard let accountsManager = appEnvironment?.accountsManager else { return false }
+
+        return accountsManager.accounts(forInstance: instance.id).contains {
+            accountsManager.status(for: $0.id) == .credentialRejected
+        }
+    }
+
     @ViewBuilder
     private func instanceStatusView(for instance: Instance) -> some View {
-        if needsCredentials(instance) {
+        // A refused login comes first: it names one thing the user has to do,
+        // and two warnings stacked on one row say less than either alone.
+        if hasRejectedAccount(instance) {
+            Label(
+                AccountStatusBadge.text(for: .credentialRejected),
+                systemImage: "person.crop.circle.badge.exclamationmark"
+            )
+            .font(.caption2)
+            .foregroundStyle(AccountStatusBadge.color(for: .credentialRejected))
+        } else if needsCredentials(instance) {
             Label(String(localized: "sources.status.authRequired"), systemImage: "key.fill")
                 .font(.caption2)
                 .foregroundStyle(.orange)
-        } else if let status = instancesManager?.status(for: instance) {
-            switch status {
-            case .authFailed:
-                Label(String(localized: "sources.status.authFailed"), systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            case .authRequired:
-                Label(String(localized: "sources.status.authRequired"), systemImage: "key.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            default:
-                EmptyView()
-            }
         }
     }
 
@@ -584,8 +596,8 @@ struct SourcesListView: View {
     // MARK: - Actions
 
     private func confirmDelete() {
-        if let instance = pendingDeleteInstance, let manager = instancesManager {
-            manager.remove(instance)
+        if let instance = pendingDeleteInstance {
+            appEnvironment?.removeInstance(instance)
             pendingDeleteInstance = nil
         }
 
@@ -602,6 +614,11 @@ struct SourcesListView: View {
             return String(localized: "sources.delete.confirmation.single \(source.name)")
         }
         return String(localized: "sources.delete.confirmation")
+    }
+
+    private var deleteConfirmationAccounts: String? {
+        guard let instance = pendingDeleteInstance else { return nil }
+        return InstanceDeletionDisclosure.message(for: instance, in: appEnvironment)
     }
 }
 

@@ -28,6 +28,22 @@ struct InstanceFilteringTests {
         #expect(youtubeInstances.allSatisfy { $0.type == .invidious || $0.type == .piped })
     }
 
+    @Test("Account-capable instances come from the capability table")
+    func accountCapableInstancesFollowCapabilities() {
+        let manager = makeTestInstancesManager()
+        #expect(!manager.hasAccountCapableInstances)
+
+        manager.add(Instance(type: .peertube, url: URL(string: "https://pt.example.com")!))
+        manager.add(Instance(type: .yatteeServer, url: URL(string: "https://ys.example.com")!))
+        #expect(manager.accountCapableInstances.isEmpty)
+        #expect(!manager.hasAccountCapableInstances)
+
+        manager.add(Instance(type: .invidious, url: URL(string: "https://inv.example.com")!))
+        manager.add(Instance(type: .piped, url: URL(string: "https://piped.example.com")!))
+        #expect(manager.accountCapableInstances.map(\.type) == [.invidious, .piped])
+        #expect(manager.hasAccountCapableInstances)
+    }
+
     @Test("Filter PeerTube instances")
     func filterPeerTubeInstances() {
         let instances = [
@@ -54,6 +70,30 @@ struct InstanceFilteringTests {
 
         #expect(enabledInstances.count == 1)
         #expect(enabledInstances.first?.url.host == "enabled.example.com")
+    }
+
+    @Test("A disabled instance leaves the enabled listing without leaving the app")
+    func disablingPartitionsRatherThanRemoves() {
+        let manager = makeTestInstancesManager()
+        let instance = Instance(type: .invidious, url: URL(string: "https://inv.example.com")!)
+        manager.add(instance)
+
+        #expect(manager.enabledInstances.map(\.id) == [instance.id])
+
+        manager.toggleEnabled(instance)
+
+        // Every listing in the Sources tab is filtered to `enabledInstances`,
+        // so this is exactly the disappearance the recovery section undoes —
+        // and it can only undo it because the instance is still here.
+        #expect(manager.enabledInstances.isEmpty)
+        #expect(manager.instances.filter { !$0.isEnabled }.map(\.id) == [instance.id])
+
+        // Turning it back on takes the stale copy the row was drawn from: the
+        // row's instance is a value, and it stopped matching the stored one the
+        // moment it was switched off.
+        manager.toggleEnabled(instance)
+
+        #expect(manager.enabledInstances.map(\.id) == [instance.id])
     }
 }
 
@@ -146,4 +186,16 @@ struct InstanceIdentityTests {
         instance.name = "New Name"
         #expect(instance.id == originalID)
     }
+}
+
+// MARK: - Test Support
+
+/// An instances manager with defaults of its own.
+///
+/// `InstancesManager()` reads and writes `UserDefaults.standard`, which under a
+/// test host is the app's own container: an instance a fixture adds becomes one
+/// the app on that device is configured with, and it stays there after the run.
+@MainActor
+func makeTestInstancesManager() -> InstancesManager {
+    InstancesManager(defaults: UserDefaults(suiteName: "yattee.tests.instances.\(UUID().uuidString)")!)
 }

@@ -17,10 +17,21 @@ import UIKit
 final class StatusBarVisibilityController {
     var isHidden: Bool = false
     weak var viewController: UIViewController?
+    /// Last non-zero status bar height seen — layouts that keep a fixed
+    /// status-bar-sized inset while the bar is hidden (corner layout) read
+    /// it because the safe area reports 0 once the bar is gone.
+    var knownStatusBarHeight: CGFloat = 0
 
     func setHidden(_ hidden: Bool) {
+        rememberStatusBarHeight(
+            viewController?.view.window?.windowScene?.statusBarManager?.statusBarFrame.height ?? 0
+        )
         isHidden = hidden
         viewController?.setNeedsStatusBarAppearanceUpdate()
+    }
+
+    func rememberStatusBarHeight(_ height: CGFloat) {
+        if height > 0 { knownStatusBarHeight = height }
     }
 }
 
@@ -90,6 +101,13 @@ private final class ExpandedPlayerHostingController<Content: View>: UIHostingCon
         .fade
     }
 
+    /// The player is a video-first, mostly non-scrolling UI: keep the status bar horizontal
+    /// (iPhone Duo exterior) instead of reserving a trailing column beside the video.
+    @available(iOS 27.1, *)
+    override var preferredVerticalBarBehavior: UIVerticalBarBehavior {
+        .disabled
+    }
+
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         
@@ -103,6 +121,22 @@ private final class ExpandedPlayerHostingController<Content: View>: UIHostingCon
             guard let window = self?.view.window,
                   let scene = window.windowScene else { return }
             window.frame = scene.coordinateSpace.bounds
+        }, completion: { [weak self] _ in
+            // Folding/unfolding the iPhone Duo (and display handoffs in
+            // general) changes the safe area without a rotation; SwiftUI
+            // keeps serving the previous insets to the sheet's GeometryReader
+            // until the hosting controller's safe area is invalidated. Nudge
+            // additionalSafeAreaInsets, the same trick the dismiss path uses
+            // for the main window.
+            guard let self else { return }
+            let originalInsets = self.additionalSafeAreaInsets
+            self.additionalSafeAreaInsets = UIEdgeInsets(
+                top: originalInsets.top + 1,
+                left: originalInsets.left,
+                bottom: originalInsets.bottom,
+                right: originalInsets.right
+            )
+            self.additionalSafeAreaInsets = originalInsets
         })
     }
 
@@ -144,6 +178,15 @@ private final class DragToDismissGestureHandler: NSObject, UIGestureRecognizerDe
     var isPanelDragging: (() -> Bool)?
     /// Returns the portrait panel frame in screen coordinates (for gesture conflict resolution)
     var getPortraitPanelFrame: (() -> CGRect)?
+    /// Returns the corner layout below-video panel frame in screen coordinates (blocks dismiss pan)
+    var getCornerBelowPanelFrame: (() -> CGRect)?
+    /// Returns true while the corner layout is active (its panels don't block pinch)
+    var isCornerLayoutActive: (() -> Bool)?
+    /// Returns the corner layout video region frame in screen coordinates (pinch must start inside it)
+    var getCornerVideoFrame: (() -> CGRect)?
+    /// Returns the panel resize grabber strip frame in screen coordinates (blocks dismiss pan)
+    var getPanelResizeGrabberFrame: (() -> CGRect)?
+    var getPlayerSideSliderFrames: (() -> [CGRect])?
     /// Returns whether the portrait panel is currently visible (not hidden off-screen)
     var isPortraitPanelVisible: (() -> Bool)?
     /// Returns the progress bar frame in screen coordinates (for gesture conflict resolution)
@@ -156,14 +199,12 @@ private final class DragToDismissGestureHandler: NSObject, UIGestureRecognizerDe
     // Main window scaling callbacks (Apple Music-style effect)
     var onMainWindowScaleChanged: ((CGFloat) -> Void)?
     var onMainWindowScaleAnimated: ((CGFloat) -> Void)?  // Animated scale to progress
-    var onMainWindowScaleReset: ((Bool) -> Void)? // Bool = animated
 
     private let dismissThreshold: CGFloat = 100
     private var isDismissing = false
     private var scrollViewAtTop = false
     private weak var trackedScrollView: UIScrollView?
     private var scrollObservation: NSKeyValueObservation?
-    private var originalBackgroundColor: UIColor?
 
     // Panscan gesture state
     private var basePanscan: Double = 0.0
@@ -235,16 +276,9 @@ private final class DragToDismissGestureHandler: NSObject, UIGestureRecognizerDe
                     // Trigger haptic immediately on release
                     onHapticFeedback?()
 
-                    // Animate off screen then dismiss - fast and smooth without bounce
-                    // Main window scale reset is handled by hide() which is called via onDismiss
-                    UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 1.0, initialSpringVelocity: 0, options: []) {
-                        window.frame.origin.y = window.bounds.height
-                        // Continue scaling main window to fully normal during dismiss animation
-                        self.onMainWindowScaleChanged?(0)
-                    } completion: { [weak self] _ in
-                        self?.onDismissGestureStateChanged?(false)
-                        self?.onDismiss?()
-                    }
+                    // The window manager owns the dismiss animation (morph into
+                    // the mini player, or slide off screen) from the current position
+                    onDismiss?()
                 } else {
                     // Snap back - restore main window scale to fully scaled
                     UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0) {
@@ -326,6 +360,12 @@ private final class DragToDismissGestureHandler: NSObject, UIGestureRecognizerDe
         // Don't allow pinch gesture when pinned panel is visible on screen or seek gesture is active
         if gestureRecognizer is UIPinchGestureRecognizer {
             if isSeekGestureActive?() == true { return false }
+            // Corner layout: the video sits in its own region beside the
+            // panels, so pinching it is fine — but not over the panels
+            if isCornerLayoutActive?() == true {
+                let videoFrame = getCornerVideoFrame?() ?? .zero
+                return videoFrame.isEmpty || videoFrame.contains(gestureRecognizer.location(in: nil))
+            }
             if isPortraitPanelVisible?() == true { return false }
             return !(isPanelPinnedAndVisible?() ?? false)
         }
@@ -361,9 +401,36 @@ private final class DragToDismissGestureHandler: NSObject, UIGestureRecognizerDe
             return false
         }
 
+        // ...or when the touch starts on a slider: the flag above is set by
+        // SwiftUI's DragGesture, which fires after this pan recognizes
+        let sliderTouch = panGesture.location(in: nil)
+        if (getPlayerSideSliderFrames?() ?? []).contains(where: { $0.contains(sliderTouch) }) {
+            return false
+        }
+
         // Don't begin dismiss gesture when dragging portrait panel
         if isPanelDragging?() == true {
             return false
+        }
+
+        // Corner layout: don't begin dismiss gesture from inside the
+        // below-video panel — its drag handle hides the panel instead
+        let belowPanelFrame = getCornerBelowPanelFrame?() ?? .zero
+        if !belowPanelFrame.isEmpty {
+            let touchLocation = panGesture.location(in: nil)
+            if belowPanelFrame.contains(touchLocation) {
+                return false
+            }
+        }
+
+        // Don't begin dismiss gesture from the panel resize grabber strip —
+        // a diagonal resize drag would otherwise be cancelled mid-resize
+        let grabberFrame = getPanelResizeGrabberFrame?() ?? .zero
+        if !grabberFrame.isEmpty {
+            let touchLocation = panGesture.location(in: nil)
+            if grabberFrame.contains(touchLocation) {
+                return false
+            }
         }
 
         // When portrait panel is visible, only allow dismiss from player area (above panel)
@@ -451,6 +518,12 @@ final class ExpandedPlayerWindowManager {
     private var expandedWindow: UIWindow?
     private weak var appEnvironment: AppEnvironment?
     private var dragHandler: DragToDismissGestureHandler?
+    /// Whether a hide is in flight (window still up, cleanup pending).
+    private var isHiding = false
+    /// Whether the morph has ended and the window waits for the mini player to
+    /// adopt the video view before hiding (any hide meanwhile must not animate).
+    private var isHandingOffToMiniPlayer = false
+    private var pendingHandOffHideCompletions: [() -> Void] = []
 
     // MARK: - Window Scaling Effect (Apple Music-style)
 
@@ -581,17 +654,6 @@ final class ExpandedPlayerWindowManager {
         return window
     }
 
-    /// The view to apply transforms to (first subview of main window)
-    /// Note: For actual transformations, use scaledPresentingView which caches the reference
-    private var presentingView: UIView? {
-        mainWindow?.subviews.first
-    }
-
-    /// Current window height for calculating transforms
-    private var windowHeight: CGFloat {
-        mainWindow?.bounds.height ?? UIScreen.main.bounds.height
-    }
-
     /// Applies scale and corner radius to main window based on progress (0 = normal, 1 = fully scaled)
     func scaleMainWindow(progress: CGFloat) {
         // Capture the presenting view reference on first call
@@ -613,7 +675,7 @@ final class ExpandedPlayerWindowManager {
         let scale = 1 - scaleAmount
 
         // Offset to keep the view centered vertically after scaling
-        let offsetY = (windowHeight * scaleAmount) / 2
+        let offsetY = (presentingView.bounds.height * scaleAmount) / 2
 
         // Apply corner radius proportional to progress
         presentingView.layer.cornerRadius = clampedProgress * scaledCornerRadius
@@ -632,7 +694,7 @@ final class ExpandedPlayerWindowManager {
         let clampedProgress = max(0, min(1, progress))
         let scaleAmount = clampedProgress * maxScaleProgress
         let scale = 1 - scaleAmount
-        let offsetY = (windowHeight * scaleAmount) / 2
+        let offsetY = (presentingView.bounds.height * scaleAmount) / 2
         let cornerRadius = clampedProgress * scaledCornerRadius
         
         UIView.animate(withDuration: duration, delay: 0, usingSpringWithDamping: damping, initialSpringVelocity: 0, options: []) {
@@ -640,18 +702,6 @@ final class ExpandedPlayerWindowManager {
                 .scaledBy(x: scale, y: scale)
                 .translatedBy(x: 0, y: offsetY)
             presentingView.layer.cornerRadius = cornerRadius
-        }
-    }
-
-    /// Resets main window to normal state with animation
-    func resetMainWindowAnimated(duration: TimeInterval = 0.3) {
-        let view = scaledPresentingView ?? mainWindow?.subviews.first
-        UIView.animate(withDuration: duration) {
-            view?.layer.cornerRadius = 0
-            view?.transform = .identity
-        } completion: { [weak self] _ in
-            view?.layer.masksToBounds = false
-            self?.scaledPresentingView = nil
         }
     }
 
@@ -718,10 +768,6 @@ final class ExpandedPlayerWindowManager {
         }
     }
 
-    var isPresented: Bool {
-        expandedWindow != nil
-    }
-
     func show(with appEnvironment: AppEnvironment, animated: Bool = true) {
         LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] show called, expandedWindow=\(expandedWindow != nil), animated=\(animated), retryCount=\(showRetryCount)")
         guard expandedWindow == nil else { return }
@@ -765,11 +811,19 @@ final class ExpandedPlayerWindowManager {
         window.windowLevel = .normal + 1  // Above main content, below fullscreen player
         window.backgroundColor = .clear  // Clear for dismiss gesture; SwiftUI provides background
 
-        // Create status bar controller
+        // Create status bar controller; seed the bar height while the main
+        // UI still shows it (the player may hide it before any layout reads it)
         let statusBarController = StatusBarVisibilityController()
+        statusBarController.rememberStatusBarHeight(windowScene.statusBarManager?.statusBarFrame.height ?? 0)
 
         // Create the expanded player view with status bar controller in environment
-        let expandedView = ExpandedPlayerSheet()
+        // Seed the portrait panel state before the first frame so the preset's
+        // default visibility doesn't animate a video position jump on expand.
+        let initialPanelVisible = ExpandedPlayerSheet.initialPortraitPanelVisibility(
+            settingsManager: appEnvironment.settingsManager
+        )
+        LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] show: initialPortraitPanelVisible=\(initialPanelVisible), portraitDefaultVisibility=\(PanelSettings.cached.effectiveDefaultVisibility(for: .portrait))")
+        let expandedView = ExpandedPlayerSheet(initialPortraitPanelVisible: initialPanelVisible)
             .appEnvironment(appEnvironment)
             .environment(\.statusBarVisibilityController, statusBarController)
 
@@ -802,10 +856,7 @@ final class ExpandedPlayerWindowManager {
             self?.appEnvironment?.settingsManager.triggerHapticFeedback(for: .playerDismiss)
         }
         handler.onDismiss = { [weak self] in
-            // Set collapsing state BEFORE isPlayerExpanded=false to ensure mini player
-            // shows video immediately when it appears (it checks isPlayerCollapsing)
-            self?.appEnvironment?.navigationCoordinator.isPlayerCollapsing = true
-            self?.appEnvironment?.navigationCoordinator.isPlayerExpanded = false
+            self?.dismissFromGesture()
         }
         handler.onDismissGestureStateChanged = { [weak self] isActive in
             self?.appEnvironment?.navigationCoordinator.isPlayerDismissGestureActive = isActive
@@ -838,6 +889,21 @@ final class ExpandedPlayerWindowManager {
         }
         handler.getPortraitPanelFrame = { [weak self] in
             self?.appEnvironment?.navigationCoordinator.portraitPanelFrame ?? .zero
+        }
+        handler.getCornerBelowPanelFrame = { [weak self] in
+            self?.appEnvironment?.navigationCoordinator.cornerBelowPanelFrame ?? .zero
+        }
+        handler.isCornerLayoutActive = { [weak self] in
+            self?.appEnvironment?.navigationCoordinator.isCornerLayoutActive ?? false
+        }
+        handler.getCornerVideoFrame = { [weak self] in
+            self?.appEnvironment?.navigationCoordinator.cornerVideoFrame ?? .zero
+        }
+        handler.getPanelResizeGrabberFrame = { [weak self] in
+            self?.appEnvironment?.navigationCoordinator.panelResizeGrabberFrame ?? .zero
+        }
+        handler.getPlayerSideSliderFrames = { [weak self] in
+            self?.appEnvironment?.navigationCoordinator.playerSideSliderFrames.values.filter { !$0.isEmpty } ?? []
         }
         handler.isPortraitPanelVisible = { [weak self] in
             self?.appEnvironment?.navigationCoordinator.isPortraitPanelVisible ?? true
@@ -938,6 +1004,249 @@ final class ExpandedPlayerWindowManager {
         LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] show complete")
     }
 
+    /// Drag-to-dismiss released past the threshold: morph the video into the
+    /// mini player when its preview is on screen, otherwise slide off screen.
+    private func dismissFromGesture() {
+        guard let nav = appEnvironment?.navigationCoordinator else { return }
+
+        if morphIntoMiniPlayer(completion: { [weak self] in
+            self?.handOffToMiniPlayer()
+        }) {
+            return
+        }
+
+        // Slide off: hide() animates from the dragged position and marks the
+        // window not visible before the gesture flag clears (no black overlay
+        // frame). isPlayerExpanded flips last, so the mini player doesn't take
+        // the video view from the sliding window.
+        expandedWindow?.isUserInteractionEnabled = false
+        hide(animated: true) {
+            nav.isPlayerExpanded = false
+        }
+        nav.isPlayerDismissGestureActive = false
+    }
+
+    /// Ends the morph: un-expands so the mini player mounts its video view, and
+    /// hides the window only once that view has actually moved into the mini
+    /// player. SwiftUI may mount it a frame later; hiding first left a frame
+    /// with neither (a blank preview).
+    private func handOffToMiniPlayer() {
+        guard let nav = appEnvironment?.navigationCoordinator else { return }
+        let playerView = (appEnvironment?.playerService.currentBackend as? MPVBackend)?.playerView
+
+        nonisolated(unsafe) var observer: (any NSObjectProtocol)?
+        let finish: () -> Void = { [weak self] in
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            observer = nil
+            nav.isPlayerMorphingToMini = false
+            guard let self, self.isHandingOffToMiniPlayer else { return }
+            self.isHandingOffToMiniPlayer = false
+            // Hide now, in the same pass the mini player adopts the view; the full
+            // cleanup (layout passes, orientation) runs outside that SwiftUI update
+            self.expandedWindow?.isHidden = true
+            let completions = self.pendingHandOffHideCompletions
+            self.pendingHandOffHideCompletions = []
+            DispatchQueue.main.async { [weak self] in
+                self?.hide(animated: false) {
+                    completions.forEach { $0() }
+                }
+            }
+        }
+
+        isHandingOffToMiniPlayer = true
+        if let playerView, playerView.window === expandedWindow {
+            // Adopting isn't enough: the view keeps its old size and the new
+            // container is still zero-sized until the next layout pass, so the
+            // preview is blank for a frame. Wait until it's laid out there.
+            observer = NotificationCenter.default.addObserver(
+                forName: .mpvPlayerViewDidChangeContainer, object: playerView, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    if let observer {
+                        NotificationCenter.default.removeObserver(observer)
+                    }
+                    observer = nil
+                    self?.waitUntilLaidOutInMiniPlayer(playerView, then: finish)
+                }
+            }
+            // Fallback when the mini player never takes the view (video hidden in it)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { finish() }
+        } else {
+            DispatchQueue.main.async { finish() }
+        }
+
+        nav.isPlayerDismissGestureActive = false
+        nav.isPlayerCollapsing = true
+        nav.isPlayerExpanded = false
+    }
+
+    /// Calls `then` on the first display frame after the player view sits,
+    /// sized, in a container outside the expanded window: by then that layout
+    /// pass has re-rendered it into its resized framebuffer.
+    private func waitUntilLaidOutInMiniPlayer(_ playerView: UIView, then: @escaping () -> Void) {
+        let isLaidOut = { [weak self] in
+            let size = playerView.bounds.size
+            return playerView.window != nil
+                && playerView.window !== self?.expandedWindow
+                && size.width > 1 && size.height > 1
+                && playerView.superview?.bounds.size == size
+        }
+        // The container adopts it already sized and redrawn: hide right away,
+        // in the same frame (the window has a black hole where the video was)
+        if isLaidOut() {
+            then()
+            return
+        }
+        var wasLaidOut = false
+        let ticker = DisplayLinkTicker()
+        ticker.start { [weak self] in
+            guard let self, self.isHandingOffToMiniPlayer else {
+                ticker.stop()
+                return
+            }
+            if wasLaidOut {
+                ticker.stop()
+                then()
+            }
+            wasLaidOut = isLaidOut()
+        }
+    }
+
+    /// Makes the main window's SwiftUI content pick up its current safe area
+    /// (setNeedsLayout alone doesn't invalidate SwiftUI's cached insets).
+    private func refreshMainWindowSafeArea() {
+        guard let rootVC = mainWindow?.rootViewController else { return }
+        let insets = rootVC.additionalSafeAreaInsets
+        rootVC.additionalSafeAreaInsets = UIEdgeInsets(top: insets.top + 1, left: insets.left, bottom: insets.bottom, right: insets.right)
+        rootVC.additionalSafeAreaInsets = insets
+        rootVC.view.setNeedsLayout()
+        rootVC.view.layoutIfNeeded()
+    }
+
+    /// Shrinks the expanded window onto its video and flies it into the mini
+    /// player's video preview. Returns false (doing nothing) when no target is
+    /// available, so the caller falls back to sliding off screen.
+    private func morphIntoMiniPlayer(completion: @escaping () -> Void) -> Bool {
+        guard let window = expandedWindow,
+              let hostView = window.rootViewController?.view,
+              let nav = appEnvironment?.navigationCoordinator,
+              !didRotateDuringSession,
+              let playerView = (appEnvironment?.playerService.currentBackend as? MPVBackend)?.playerView,
+              playerView.window === window,
+              mainWindow.map({ $0.bounds.size == window.bounds.size }) == true else {
+            return false
+        }
+
+        // The mini player reports its SwiftUI global frame, which ignores the scale
+        // transform on the main window's content (that animates back to identity
+        // alongside the morph), so it is already where the mini player ends up.
+        // The scaled content did get a smaller bottom safe area (UIKit derives it
+        // from the transformed frame), which comes back once unscaled and lifts
+        // the bottom-anchored mini player by the difference.
+        var target = nav.miniPlayerVideoFrame
+        if let mainWindow, let mainRootView = mainWindow.rootViewController?.view {
+            target.origin.y -= max(0, mainWindow.safeAreaInsets.bottom - mainRootView.safeAreaInsets.bottom)
+        }
+        let renderRect = playerView.convert(playerView.bounds, to: window)
+        let source = visibleVideoRect(in: renderRect, panelFrame: hostView.convert(nav.portraitPanelFrame, to: window), nav: nav)
+        guard target.width > 1, target.height > 1, window.bounds.contains(target),
+              source.width > 1, source.height > 1 else {
+            return false
+        }
+
+        // The mask doesn't stop hit testing: keep stray touches off the hidden controls
+        window.isUserInteractionEnabled = false
+        hostView.layer.removeAllAnimations()
+        nav.isPlayerMorphingToMini = true
+        nav.isPlayerWindowVisible = false
+
+        // Only the video morphs: the window mask keeps the video opaque as it
+        // flies to the target and fades everything around it (title, panels) out.
+        // The window keeps its drag offset and animates back to 0 alongside the
+        // morph; content and mask share that offset, so both are expressed in
+        // un-offset window coordinates. (Transforming the UIWindow itself stops
+        // it rendering.)
+        let mask = UIView(frame: window.bounds)
+        let surroundingMask = UIView(frame: window.bounds)
+        surroundingMask.backgroundColor = .black
+        let videoMask = UIView(frame: source)
+        videoMask.backgroundColor = .black
+        videoMask.layer.cornerCurve = .continuous
+        mask.addSubview(surroundingMask)
+        mask.addSubview(videoMask)
+        window.mask = mask
+
+        // Map the source rect onto the target rect (a view transform applies about its center)
+        let center = hostView.center
+        let scaleX = target.width / source.width
+        let scaleY = target.height / source.height
+        let finalTransform = CGAffineTransform(
+            a: scaleX, b: 0, c: 0, d: scaleY,
+            tx: target.midX - center.x - scaleX * (source.midX - center.x),
+            ty: target.midY - center.y - scaleY * (source.midY - center.y)
+        )
+
+        // UIKit derives a view's safe area from its transformed frame: once scaled
+        // toward the mini player the host no longer overlaps the status bar, its
+        // top inset drops to 0 and SwiftUI re-lays the player out higher — out
+        // from under the mask. Capture the insets to pin them below.
+        let insetsBefore = hostView.safeAreaInsets
+
+        UIView.animate(withDuration: 0.15) {
+            surroundingMask.alpha = 0
+        }
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 1.0, initialSpringVelocity: 0, options: []) {
+            window.frame.origin.y = 0
+            hostView.transform = finalTransform
+            videoMask.frame = target
+            videoMask.layer.cornerRadius = nav.miniPlayerVideoCornerRadius
+            self.scaleMainWindow(progress: 0)
+        } completion: { _ in
+            completion()
+        }
+
+        // Unscaled, the main content gets its full safe area back: re-lay it out
+        // now, under the morphing video, rather than with a late jump at the end
+        refreshMainWindowSafeArea()
+
+        // Pin the safe area: add back whatever the transform took away
+        if let hostingController = window.rootViewController {
+            window.layoutIfNeeded()
+            let insetsAfter = hostView.safeAreaInsets
+            let additional = hostingController.additionalSafeAreaInsets
+            hostingController.additionalSafeAreaInsets = UIEdgeInsets(
+                top: additional.top + insetsBefore.top - insetsAfter.top,
+                left: additional.left + insetsBefore.left - insetsAfter.left,
+                bottom: additional.bottom + insetsBefore.bottom - insetsAfter.bottom,
+                right: additional.right + insetsBefore.right - insetsAfter.right
+            )
+            hostView.layoutIfNeeded()
+        }
+        return true
+    }
+
+    /// The part of the render view that shows video: the aspect-fit picture,
+    /// minus whatever the portrait details panel covers.
+    private func visibleVideoRect(in renderRect: CGRect, panelFrame panel: CGRect, nav: NavigationCoordinator) -> CGRect {
+        let aspect = CGFloat(appEnvironment?.playerService.state.displayAspectRatio ?? 16.0 / 9.0)
+        var rect = renderRect
+        if aspect > 0 {
+            if renderRect.width / renderRect.height > aspect {
+                let width = renderRect.height * aspect
+                rect = CGRect(x: renderRect.midX - width / 2, y: renderRect.minY, width: width, height: renderRect.height)
+            } else {
+                let height = renderRect.width / aspect
+                rect = CGRect(x: renderRect.minX, y: renderRect.midY - height / 2, width: renderRect.width, height: height)
+            }
+        }
+        if nav.isPortraitPanelVisible, panel.height > 0, panel.minY < rect.maxY, panel.minY > rect.minY {
+            rect.size.height = panel.minY - rect.minY
+        }
+        return rect
+    }
+
     func hide(animated: Bool = true, completion: (() -> Void)? = nil) {
         LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] hide called, expandedWindow=\(expandedWindow != nil), animated=\(animated)")
 
@@ -946,19 +1255,37 @@ final class ExpandedPlayerWindowManager {
         showRetryCount = 0
         pendingScaleApplication = false
 
-        // Mark window as not visible immediately and start collapsing animation
         appEnvironment?.navigationCoordinator.isPlayerWindowVisible = false
-        appEnvironment?.navigationCoordinator.isPlayerCollapsing = true
-        LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] hide: isPlayerWindowVisible=false, isPlayerCollapsing=true")
 
         guard let window = expandedWindow else {
             completion?()
             return
         }
 
+        // The morphed window sits on the mini player until the mini player has
+        // laid out the video; the handoff hides it then
+        if isHandingOffToMiniPlayer {
+            if let completion {
+                pendingHandOffHideCompletions.append(completion)
+            }
+            return
+        }
+
+        // A hide is already running (e.g. the gesture's hide followed by the
+        // isPlayerExpanded onChange); a second one would clean up twice
+        guard !isHiding else {
+            completion?()
+            return
+        }
+        isHiding = true
+        // Start collapsing animation
+        appEnvironment?.navigationCoordinator.isPlayerCollapsing = true
+        LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] hide: isPlayerWindowVisible=false, isPlayerCollapsing=true")
+
         let cleanup: () -> Void = { [weak self] in
             LoggingService.shared.logPlayer("[ExpandedPlayerWindowManager] hide: cleanup")
-            
+            self?.isHiding = false
+
             // Always ensure main window transform is fully reset (safeguard against race conditions)
             self?.resetMainWindowImmediate()
             
@@ -1053,6 +1380,32 @@ final class ExpandedPlayerWindowManager {
             resetMainWindowImmediate()
             cleanup()
         }
+    }
+}
+#endif
+
+#if os(iOS)
+/// Runs a closure once per display frame until stopped.
+@MainActor
+private final class DisplayLinkTicker: NSObject {
+    private var displayLink: CADisplayLink?
+    private var tick: (() -> Void)?
+
+    func start(_ tick: @escaping () -> Void) {
+        self.tick = tick
+        let link = CADisplayLink(target: self, selector: #selector(fire))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+        tick = nil
+    }
+
+    @objc private func fire() {
+        tick?()
     }
 }
 #endif

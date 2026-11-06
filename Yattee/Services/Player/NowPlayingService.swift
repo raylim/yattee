@@ -37,7 +37,6 @@ final class NowPlayingService {
 
     weak var playerService: PlayerService?
     weak var deArrowBrandingProvider: DeArrowBrandingProvider?
-    weak var settingsManager: SettingsManager?
     weak var playerControlsLayoutService: PlayerControlsLayoutService?
 
     // MARK: - Initialization
@@ -84,7 +83,7 @@ final class NowPlayingService {
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPNowPlayingInfoPropertyPlaybackQueueCount: 1,
             MPNowPlayingInfoPropertyPlaybackQueueIndex: 0,
-            MPMediaItemPropertyMediaType: MPMediaType.anyVideo.rawValue,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
         ]
@@ -142,6 +141,7 @@ final class NowPlayingService {
 
     /// Updates playback time without changing other metadata.
     func updatePlaybackTime(currentTime: TimeInterval, duration: TimeInterval, isPlaying: Bool) {
+        PerfCounter.count("nowPlaying.update")
         guard var info = cachedNowPlayingInfo ?? infoCenter.nowPlayingInfo else { return }
 
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime

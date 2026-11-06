@@ -322,16 +322,16 @@ enum SponsorBlockCategory: String, CaseIterable, Codable, Sendable {
 
 // MARK: - Floating Panel
 
-/// Which side the floating details panel appears on in widescreen layout.
+/// Which side the details panel appears on in the standard wide layout.
 enum FloatingPanelSide: String, CaseIterable, Codable {
     case left
     case right
 
-    /// The opposite side.
-    var opposite: FloatingPanelSide {
+    /// Localized name for the settings picker.
+    var displayName: String {
         switch self {
-        case .left: return .right
-        case .right: return .left
+        case .left: return String(localized: "panel.side.left")
+        case .right: return String(localized: "panel.side.right")
         }
     }
 
@@ -386,6 +386,27 @@ enum MiniPlayerVideoTapAction: String, CaseIterable, Codable {
     }
 }
 
+// MARK: - Navigation Style
+
+/// Navigation layout on screens that fit the sidebar (iPad, iPhone Duo inner screen).
+#if os(iOS)
+enum NavigationStyle: String, CaseIterable, Codable {
+    /// Sidebar where it fits, tab bar elsewhere.
+    case automatic
+    /// Tab bar everywhere.
+    case tabBar
+
+    var displayName: String {
+        switch self {
+        case .automatic:
+            return String(localized: "settings.navigationStyle.automatic")
+        case .tabBar:
+            return String(localized: "settings.navigationStyle.tabBar")
+        }
+    }
+}
+#endif
+
 // MARK: - Mini Player Minimize Behavior
 
 /// Behavior for minimizing the mini player (iOS 26+ only).
@@ -422,6 +443,49 @@ enum VideoTapAction: String, CaseIterable, Codable {
             return String(localized: "settings.behavior.videoTap.openInfo")
         case .none:
             return String(localized: "settings.behavior.videoTap.none")
+        }
+    }
+}
+
+// MARK: - Video Info Actions
+
+/// Where the video info view shows its actions (Play, Download, Share, Add to Playlist, Bookmark).
+enum VideoInfoActionsLayout: String, CaseIterable, Codable {
+    /// Inline button rows below the header.
+    case buttons
+    /// Primary action in the toolbar; the rest in an ellipsis menu (default).
+    case toolbar
+
+    var displayName: String {
+        switch self {
+        case .buttons:
+            return String(localized: "settings.videoInfo.actionsLayout.buttons")
+        case .toolbar:
+            return String(localized: "settings.videoInfo.actionsLayout.toolbar")
+        }
+    }
+}
+
+/// The action pinned to the video info toolbar when `VideoInfoActionsLayout.toolbar` is active.
+enum VideoInfoPrimaryAction: String, CaseIterable, Codable {
+    case play
+    case download
+    case share
+    case addToPlaylist
+    case bookmark
+
+    var displayName: String {
+        switch self {
+        case .play:
+            return String(localized: "video.context.play")
+        case .download:
+            return String(localized: "video.download")
+        case .share:
+            return String(localized: "video.share")
+        case .addToPlaylist:
+            return String(localized: "video.context.addToPlaylist")
+        case .bookmark:
+            return String(localized: "video.bookmark")
         }
     }
 }
@@ -558,11 +622,6 @@ enum VideoSwipeAction: String, CaseIterable, Codable, Identifiable {
         case .addToPlaylist: return String(localized: "swipeAction.addToPlaylist")
         case .markWatched: return String(localized: "swipeAction.markWatched")
         }
-    }
-
-    /// Default order with only download and share enabled.
-    static var defaultOrder: [VideoSwipeAction] {
-        [.download, .share]
     }
 
     /// Default visibility: only download and share are enabled by default.

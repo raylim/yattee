@@ -18,17 +18,35 @@ struct PortraitDetailsPanel: View {
     let onFullscreen: (() -> Void)?
     let pillsOverlayOpacity: CGFloat
 
+    /// Corner layout host: comments live in the side column, so the pill is
+    /// suppressed entirely.
+    var hidesCommentsPill: Bool = false
+
+    /// Portrait inlines chapters/related into the info page; the corner
+    /// layout's below-video host turns this off because those live in the
+    /// side column tabs (the description stays collapsible either way).
+    var inlineInfoSections: Bool = true
+
+    /// Panel clip rounding — the corner layout's below-video host uses 0
+    /// for a plain rectangle.
+    var panelCornerRadius: CGFloat = 16
+    /// Moves the pills off the leading part of the panel (foldable book
+    /// posture with the side column hidden: pills centered on the half right
+    /// of the hinge).
+    var pillsLeadingInset: CGFloat = 0
+
     // Drag gesture callbacks
     var onDragChanged: ((CGFloat) -> Void)?
     var onDragEnded: ((CGFloat, CGFloat) -> Void)?
     var onDragCancelled: (() -> Void)?
+    /// Asks the host to expand the panel (comments pill → comments page).
+    var onRequestExpand: (() -> Void)?
     @GestureState private var isDraggingHandle: Bool = false
     @State private var isCommentsExpanded: Bool = false
-    @State private var showFormattedDate = false
+    @State private var selectedPage: PanelPageType = .info
     @State private var scrollOffset: CGFloat = 0
     @State private var scrollToTopTrigger: Bool = false
-    @State private var showQueueSheet: Bool = false
-    @State private var showPlaylistSheet: Bool = false
+    @Environment(\.presentAppSheet) private var presentAppSheet
 
     private var settingsManager: SettingsManager? { appEnvironment?.settingsManager }
     private var accentColor: Color { settingsManager?.resolvedAccentColor ?? .accentColor }
@@ -36,21 +54,15 @@ struct PortraitDetailsPanel: View {
     private var playerState: PlayerState? { playerService?.state }
     private var isPanelDragging: Bool { appEnvironment?.navigationCoordinator.isPanelDragging ?? false }
 
-    // Read video and dislikeCount from playerState for reactive updates
+    // Read video from playerState for reactive updates
     private var video: Video? { playerState?.currentVideo }
-    private var dislikeCount: Int? { playerState?.dislikeCount }
 
     // Comments helpers
     private var comments: [Comment] { playerState?.comments ?? [] }
     private var commentsState: CommentsLoadState { playerState?.commentsState ?? .idle }
 
-    // Video details helpers
-    private var videoDetailsState: VideoDetailsLoadState { playerState?.videoDetailsState ?? .idle }
-
     // Queue helpers
     private var queue: [QueuedVideo] { playerState?.queue ?? [] }
-    private var history: [QueuedVideo] { playerState?.history ?? [] }
-    private var isQueueEnabled: Bool { settingsManager?.queueEnabled ?? true }
 
     // Player pill helpers
     private var playerPillSettings: PlayerPillSettings {
@@ -61,19 +73,30 @@ struct PortraitDetailsPanel: View {
         !playerPillSettings.buttons.isEmpty
     }
 
-    // Comments pill helpers
+    // Comments pill helpers (mode lives on the comments page settings)
     private var commentsPillMode: CommentsPillMode {
-        playerPillSettings.effectiveCommentsPillMode
+        panelSettings.commentsPillMode
     }
     private var shouldShowCommentsPill: Bool {
-        playerPillSettings.shouldShowCommentsPill
+        !hidesCommentsPill && commentsPillMode != .disabled
     }
     private var isCommentsPillAlwaysCollapsed: Bool {
-        playerPillSettings.isCommentsPillAlwaysCollapsed
+        commentsPillMode.alwaysCollapsed
     }
 
     private var hasVideoDescription: Bool {
         !(video?.description ?? "").isEmpty
+    }
+
+    // Panel pages configuration
+    private var panelSettings: PanelSettings {
+        playerControlsLayout.effectivePanelSettings
+    }
+
+    /// Prototype: portrait has a single info page with inline sections, so the
+    /// comments pill always opens the comments overlay, never a page.
+    private var isCommentsPageAvailable: Bool {
+        false
     }
 
     /// Whether any pills are currently visible in the overlay
@@ -83,19 +106,15 @@ struct PortraitDetailsPanel: View {
     }
 
     /// Whether comments pill is shown expanded on its own row (above player pill)
+    /// Whether the comments pill currently occupies its own row above the
+    /// player pill. Must track the pill's actual collapse state (including
+    /// collapse on scroll): the bottom fade sizes its touch blocker from
+    /// this, and a stale "expanded" answer swallows taps on the last rows
+    /// of content, e.g. a collapsed section header.
     private var hasExpandedCommentsPill: Bool {
         let hasCommentsPill = commentsState == .loaded && !comments.isEmpty && shouldShowCommentsPill
-        return hasCommentsPill && shouldShowPlayerPill && !isCommentsPillAlwaysCollapsed && hasVideoDescription
-    }
-
-    /// Returns the first enabled Yattee Server instance URL, if any.
-    private var yatteeServerURL: URL? {
-        appEnvironment?.instancesManager.yatteeServerInstances.first { $0.isEnabled }?.url
-    }
-
-    /// Returns the DeArrow title if available and enabled, otherwise the original title.
-    private func displayTitle(for video: Video) -> String {
-        appEnvironment?.deArrowBrandingProvider.title(for: video) ?? video.title
+        let isPillCollapsed = scrollOffset > 20 || isCommentsPillAlwaysCollapsed || !hasVideoDescription
+        return hasCommentsPill && shouldShowPlayerPill && !isPillCollapsed
     }
 
     // MARK: - Drag Handle
@@ -139,58 +158,42 @@ struct PortraitDetailsPanel: View {
     var body: some View {
         if let video {
             ZStack(alignment: .top) {
-                // Scrollable content (extends to top, scrolls under drag handle)
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            // Anchor for scroll-to-top
-                            Color.clear
-                                .frame(height: 0)
-                                .id("panelTop")
-
-                            // Top padding so content isn't initially obscured by drag handle
-                            Color.clear
-                                .frame(height: 10)
-
-                            videoInfo(video)
-
-                            Divider()
-                                .padding(.horizontal)
-
-                            infoTabSection(video)
+                // Unified page content (page bar + selected page)
+                PlayerPanelContentView(
+                    panelSettings: panelSettings,
+                    selectedPage: $selectedPage,
+                    context: PanelPageContext(
+                        appEnvironment: appEnvironment,
+                        video: video,
+                        accentColor: accentColor,
+                        onChannelTap: onChannelTap
+                    ),
+                    scrollConfig: PanelScrollConfig(
+                        topInset: 10,
+                        bottomInset: hasVideoDescription ? 80 : 50,
+                        scrollOffsetChanged: { offset in
+                            scrollOffset = offset
+                        },
+                        scrollToTopTrigger: scrollToTopTrigger,
+                        isScrollDisabled: isDraggingHandle,
+                        onOverscrollDragChanged: { offset in
+                            onDragChanged?(offset)
+                        },
+                        onOverscrollDragEnded: { offset, predicted in
+                            onDragEnded?(offset, predicted)
                         }
-                    }
-                    .background(Color(.systemBackground))
-                    .background {
-                        // UIKit gesture handler for smooth overscroll-to-collapse
-                        OverscrollGestureView(
-                            isEnabled: !isDraggingHandle,
-                            onDragChanged: { offset in
-                                onDragChanged?(offset)
-                            },
-                            onDragEnded: { offset, predicted in
-                                onDragEnded?(offset, predicted)
-                            }
-                        )
-                    }
-                    .scrollDisabled(isDraggingHandle)
-                    .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                        geometry.contentOffset.y
-                    } action: { _, newValue in
-                        // Update scrollOffset for pills visibility
-                        scrollOffset = max(0, newValue)
-                    }
-                    .onChange(of: scrollToTopTrigger) { _, _ in
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            proxy.scrollTo("panelTop", anchor: .top)
-                        }
-                    }
-                }
+                    ),
+                    pageBarTopPadding: 14,
+                    showPageBar: false,
+                    inlineInfoSections: inlineInfoSections
+                )
+                .background(Color(.systemBackground))
                 .overlay(alignment: .bottom) {
                     bottomFadeOverlay
                 }
 
-                // Extended drag hit area overlay - visual handle at top, hit area extends down
+                // Extended drag hit area overlay - visual handle at top, hit area
+                // extends down over the title (the portrait panel has no page bar)
                 VStack(spacing: 0) {
                     dragHandle
                     Spacer()
@@ -204,6 +207,7 @@ struct PortraitDetailsPanel: View {
                         endPoint: .bottom
                     )
                     .frame(height: 25)
+                    .allowsHitTesting(false)
                 }
                 .contentShape(Rectangle())
                 .highPriorityGesture(
@@ -235,24 +239,43 @@ struct PortraitDetailsPanel: View {
                 }
             }
             .background(Color(.systemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: panelCornerRadius))
             // Pills overlay at bottom
             .overlay {
                 if !isCommentsExpanded {
                     pillsOverlay
+                        .padding(.leading, pillsLeadingInset)
                         .opacity(pillsOverlayOpacity)
                         .allowsHitTesting(pillsOverlayOpacity > 0.01)
                 }
             }
-            // Expanded comments overlay
+            // Expanded comments overlay (only when the comments page is not
+            // available; the pill then falls back to the overlay path)
             .overlay {
-                let expanded = isCommentsExpanded
-                ExpandedCommentsView(
+                if !isCommentsPageAvailable {
+                    expandedCommentsOverlay(video: video)
+                }
+            }
+            .animation(.smooth(duration: 0.3), value: isCommentsExpanded)
+            .onChange(of: video.id) { _, _ in
+                isCommentsExpanded = false
+            }
+            .onChange(of: isCommentsExpanded) { _, newValue in
+                appEnvironment?.navigationCoordinator.isCommentsExpanded = newValue
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func expandedCommentsOverlay(video: Video) -> some View {
+        let expanded = isCommentsExpanded
+        ExpandedCommentsView(
                     videoID: video.id.videoID,
                     onClose: collapseComments,
                     onDismissGestureEnded: handleCommentsDismissGestureEnded,
                     onDragChanged: onDragChanged,
-                    onDragEnded: onDragEnded
+                    onDragEnded: onDragEnded,
+                    showAvatars: panelSettings.commentsShowAvatars
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .visualEffect { content, proxy in
@@ -277,23 +300,6 @@ struct PortraitDetailsPanel: View {
                             }
                     }
                 )
-            }
-            .animation(.smooth(duration: 0.3), value: isCommentsExpanded)
-            .onChange(of: video.id) { _, _ in
-                isCommentsExpanded = false
-            }
-            .onChange(of: isCommentsExpanded) { _, newValue in
-                appEnvironment?.navigationCoordinator.isCommentsExpanded = newValue
-            }
-            .sheet(isPresented: $showQueueSheet) {
-                QueueManagementSheet()
-            }
-            .sheet(isPresented: $showPlaylistSheet) {
-                if let currentVideo = playerState?.currentVideo {
-                    PlaylistSelectorSheet(video: currentVideo)
-                }
-            }
-        }
     }
 
     // MARK: - Pills Overlay
@@ -321,8 +327,12 @@ struct PortraitDetailsPanel: View {
                         CommentsPillView(
                             comment: firstComment,
                             isCollapsed: false,
+                            showAvatar: panelSettings.commentsShowAvatars,
                             onTap: expandComments
                         )
+                        // Wide hosts (iPad corner/stacked panels) would
+                        // stretch the excerpt across the whole panel.
+                        .frame(maxWidth: 600)
                     }
 
                     // Bottom row
@@ -379,6 +389,7 @@ struct PortraitDetailsPanel: View {
                         isCollapsed: isPillCollapsed,
                         fillWidth: !isPillCollapsed,
                         compact: isCompact && isPillCollapsed,
+                        showAvatar: panelSettings.commentsShowAvatars,
                         onTap: expandComments
                     )
                     .frame(maxWidth: isPillCollapsed ? nil : 400)
@@ -389,6 +400,7 @@ struct PortraitDetailsPanel: View {
                         comment: firstComment,
                         isCollapsed: true,
                         compact: isCompact,
+                        showAvatar: panelSettings.commentsShowAvatars,
                         onTap: expandComments
                     )
                 } else {
@@ -413,8 +425,7 @@ struct PortraitDetailsPanel: View {
                     isOrientationLocked: appEnvironment?.settingsManager.inAppOrientationLock ?? false,
                     video: video,
                     playbackRate: playerState?.rate ?? .x1,
-                    showingPlaylistSheet: $showPlaylistSheet,
-                    onQueueTap: { showQueueSheet = true },
+                    onQueueTap: { presentAppSheet(.queue()) },
                     onPrevious: { Task { await playerService?.playPrevious() } },
                     onPlayPause: { playerService?.togglePlayPause() },
                     onNext: { Task { await playerService?.playNext() } },
@@ -479,57 +490,15 @@ struct PortraitDetailsPanel: View {
         }
     }
 
-    // MARK: - Video Info
-
-    private func videoInfo(_ video: Video) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Title - full width (shows DeArrow title if available)
-            Text(displayTitle(for: video))
-                .font(.title3)
-                .fontWeight(.semibold)
-                .lineLimit(3)
-
-            // Stats row - only show for non-media-source videos
-            if !video.isFromMediaSource {
-                VideoStatsRow(
-                    playerState: playerState,
-                    showFormattedDate: $showFormattedDate,
-                    returnYouTubeDislikeEnabled: settingsManager?.returnYouTubeDislikeEnabled ?? false
-                )
-            }
-
-            // Channel row with context menu
-            VideoChannelRow(
-                author: video.author,
-                source: video.id.source,
-                yatteeServerURL: yatteeServerURL,
-                onChannelTap: onChannelTap,
-                video: video,
-                accentColor: accentColor,
-                showSubscriberCount: !video.isFromMediaSource,
-                isLoadingDetails: playerState?.videoDetailsState == .loading
-            )
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
-    // MARK: - Info Tab Section
-
-    private func infoTabSection(_ video: Video) -> some View {
-        let hasDescription = !(video.description ?? "").isEmpty
-
-        return VStack(alignment: .leading, spacing: 12) {
-            descriptionContent(video.description ?? "")
-
-            // Reduced bottom spacer when no description
-            Spacer()
-                .frame(height: hasDescription ? 80 : 50)
-        }
-        .padding(.vertical)
-    }
-
     private func expandComments() {
+        if isCommentsPageAvailable {
+            // Route to the comments page and ask the host to expand the panel
+            withAnimation(.smooth(duration: 0.3)) {
+                selectedPage = .comments
+            }
+            onRequestExpand?()
+            return
+        }
         withAnimation(.smooth(duration: 0.3)) {
             isCommentsExpanded = true
         }
@@ -546,27 +515,6 @@ struct PortraitDetailsPanel: View {
         let dismissThreshold: CGFloat = 30
         if finalOffset >= dismissThreshold {
             collapseComments()
-        }
-    }
-
-    private func descriptionContent(_ description: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !description.isEmpty {
-                Text(DescriptionText.attributed(description, linkColor: accentColor))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .tint(accentColor)
-                    .padding(.horizontal)
-                    .handleTimestampLinks(using: playerService)
-            } else if videoDetailsState == .loading {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
-                }
-                .padding()
-            }
-            // No description text removed - let panel shrink instead
         }
     }
 }

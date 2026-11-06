@@ -11,7 +11,6 @@ struct MediaBrowserView: View {
     @Environment(\.appEnvironment) private var appEnvironment
 
     let source: MediaSource
-    let initialPath: String
 
     @Namespace private var sheetTransition
     @State private var currentPath: String
@@ -33,7 +32,6 @@ struct MediaBrowserView: View {
 
     init(source: MediaSource, path: String = "/", showOnlyPlayable: Bool = false) {
         self.source = source
-        self.initialPath = path
         _currentPath = State(initialValue: path)
 
         let defaults = UserDefaults.standard
@@ -154,30 +152,32 @@ struct MediaBrowserView: View {
             title: navigationTitle
         ) {
             VStack(spacing: 0) {
-                if !(isLoading && files.isEmpty) {
-                    HStack(spacing: 24) {
-                        Button {
-                            Task { await loadFiles() }
-                        } label: {
-                            Label(String(localized: "common.refresh"), systemImage: "arrow.clockwise")
-                        }
-                        Button {
-                            showViewOptions = true
-                        } label: {
-                            Label(
-                                String(localized: "viewOptions.title"),
-                                systemImage: showOnlyPlayable
-                                    ? "line.3.horizontal.decrease.circle.fill"
-                                    : "line.3.horizontal.decrease.circle"
-                            )
-                        }
-                        Spacer()
+                // Shown while the first listing loads too: an SMB or WebDAV
+                // connection can hang for a long time, and the spinner alone
+                // gives the remote nothing to focus.
+                HStack(spacing: 24) {
+                    Button {
+                        guard !isLoading else { return }
+                        Task { await loadFiles() }
+                    } label: {
+                        Label(String(localized: "common.refresh"), systemImage: "arrow.clockwise")
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 16)
-                    .padding(.bottom, 8)
-                    .focusSection()
+                    Button {
+                        showViewOptions = true
+                    } label: {
+                        Label(
+                            String(localized: "viewOptions.title"),
+                            systemImage: showOnlyPlayable
+                                ? "line.3.horizontal.decrease.circle.fill"
+                                : "line.3.horizontal.decrease.circle"
+                        )
+                    }
+                    Spacer()
                 }
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+                .focusSection()
                 inner
                     .focusSection()
             }

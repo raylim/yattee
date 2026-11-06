@@ -124,6 +124,9 @@ struct TVPlayerView: View {
         mpvPlayerContent
             .ignoresSafeArea()
             .playerToastOverlay()
+            // Global sheet requests (e.g. link action confirmations) while the
+            // player covers the screen; the root host is underneath it.
+            .appSheetHost(isTopLevel: appEnvironment?.navigationCoordinator.isPlayerExpanded == true, toastScope: .player)
             .fullScreenCover(isPresented: $showingErrorSheet) {
                 ZStack {
                     Rectangle()
@@ -134,7 +137,15 @@ struct TVPlayerView: View {
                         .padding(.horizontal, 200)
                         .padding(.vertical, 80)
                 }
+                // Covers don't inherit the environment applied below.
+                .environment(\.colorScheme, .dark)
             }
+            // The player always sits over dark video, and its overlays
+            // (details panel, quality/queue panels) hardcode white text.
+            // Under the light color scheme, system controls (segmented
+            // picker, bordered buttons) and materials would otherwise
+            // render light-mode styles that are unreadable there.
+            .environment(\.colorScheme, .dark)
     }
 
     // MARK: - Quality Panel Content
@@ -1129,11 +1140,8 @@ struct TVFailureButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .glassBackground(
-                isFocused ? .tinted(.white.opacity(0.25)) : .regular,
-                in: .capsule,
-                fallback: isFocused ? .ultraThickMaterial : .ultraThinMaterial
-            )
+            .foregroundStyle(isFocused ? Color.black : .white)
+            .modifier(TVFocusBackground(isFocused: isFocused, shape: .capsule))
             .scaleEffect(configuration.isPressed ? 0.95 : (isFocused ? 1.08 : 1.0))
             .animation(.easeInOut(duration: 0.15), value: isFocused)
             .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)

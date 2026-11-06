@@ -134,11 +134,20 @@ struct LegacyAccountsImportView: View {
     }
 
     private var emptyState: some View {
-        ContentUnavailableView(
-            String(localized: "migration.accounts.empty.title"),
-            systemImage: "person.badge.key",
-            description: Text(String(localized: "migration.accounts.empty.description"))
-        )
+        ContentUnavailableView {
+            Label(String(localized: "migration.accounts.empty.title"), systemImage: "person.badge.key")
+        } description: {
+            Text(String(localized: "migration.accounts.empty.description"))
+        } actions: {
+            #if os(tvOS)
+            // The toolbar Done is iOS/macOS only. Once the last item is
+            // imported or removed nothing else is focusable, and the remote
+            // would be stuck — in the full screen cover and when pushed alike.
+            Button(String(localized: "common.done")) {
+                dismiss()
+            }
+            #endif
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -366,10 +375,10 @@ private struct LegacyAccountImportRow: View {
     @ViewBuilder
     private var credentialsFields: some View {
         #if os(tvOS)
-        TVSettingsTextField(title: usernameLabel, text: $state.username)
+        TVSettingsTextField(title: String(localized: "login.username"), text: $state.username)
         TVSettingsTextField(title: String(localized: "login.password"), text: $state.password, isSecure: true)
         #else
-        TextField(usernameLabel, text: $state.username)
+        TextField(String(localized: "login.username"), text: $state.username)
             .textContentType(.username)
             #if os(iOS)
             .textInputAutocapitalization(.never)
@@ -379,15 +388,6 @@ private struct LegacyAccountImportRow: View {
         SecureField(String(localized: "login.password"), text: $state.password)
             .textContentType(.password)
         #endif
-    }
-
-    private var usernameLabel: String {
-        switch item.instanceType {
-        case .invidious:
-            return String(localized: "login.email")
-        default:
-            return String(localized: "login.username")
-        }
     }
 }
 

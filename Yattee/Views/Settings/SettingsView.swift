@@ -31,12 +31,28 @@ struct SettingsView: View {
     // MARK: - macOS Settings
 
     #if os(macOS)
+    /// Accounts stays out of the list until a source that can hold one exists
+    /// (or an account survives its source and needs cleaning up).
+    private var visibleSections: [SettingsSection] {
+        SettingsSection.allCases.filter {
+            $0 != .accounts || AccountsListView.showsSettingsEntry(in: appEnvironment)
+        }
+    }
+
     private var macOSSettings: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
-                List(SettingsSection.allCases, selection: $selectedSection) { section in
-                    Label(section.title, systemImage: section.icon)
-                        .tag(section)
+                List(visibleSections, selection: $selectedSection) { section in
+                    HStack {
+                        Label(section.title, systemImage: section.icon)
+
+                        if section == .accounts, AccountsListView.needsAttention(in: appEnvironment) {
+                            Spacer()
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .tag(section)
                 }
                 .listStyle(.sidebar)
 
@@ -51,6 +67,8 @@ struct SettingsView: View {
                         switch selectedSection {
                         case .sources:
                             SourcesListView()
+                        case .accounts:
+                            AccountsListView()
                         case .icloud:
                             iCloudSettingsView()
                         case .appearance:
@@ -128,20 +146,36 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.row.sources")
 
+                    if AccountsListView.showsSettingsEntry(in: appEnvironment) {
+                        NavigationLink {
+                            AccountsListView()
+                        } label: {
+                            HStack {
+                                Label(String(localized: "accounts.title"), systemImage: "person.crop.circle")
+                                Spacer()
+                                if AccountsListView.needsAttention(in: appEnvironment) {
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("settings.row.accounts")
+                    }
+
                     NavigationLink {
                         TVSidebarDetailContainer(systemImage: "icloud", title: String(localized: "settings.icloud.title")) { iCloudSettingsView() }
                     } label: {
                         HStack {
                             Label(String(localized: "settings.icloud.title"), systemImage: "icloud")
-                            #if DEBUG
-                            Spacer()
-                            Text(String(localized: "settings.icloud.dev.badge"))
-                                .font(.caption2.bold())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.orange, in: Capsule())
-                            #endif
+                            if AppIdentifiers.isCloudKitDevelopmentEnvironment {
+                                Spacer()
+                                Text(String(localized: "settings.icloud.dev.badge"))
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(.orange, in: Capsule())
+                            }
                         }
                     }
 
@@ -229,6 +263,22 @@ struct SettingsView: View {
                         }
                     }
                     .accessibilityIdentifier("settings.row.sources")
+
+                    if AccountsListView.showsSettingsEntry(in: appEnvironment) {
+                        NavigationLink {
+                            AccountsListView()
+                        } label: {
+                            HStack {
+                                Label(String(localized: "accounts.title"), systemImage: "person.crop.circle")
+                                Spacer()
+                                if AccountsListView.needsAttention(in: appEnvironment) {
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("settings.row.accounts")
+                    }
                     }
 
                     Section {
@@ -237,15 +287,15 @@ struct SettingsView: View {
                         } label: {
                             HStack {
                                 Label(String(localized: "settings.icloud.title"), systemImage: "icloud")
-                                #if DEBUG
-                                Spacer()
-                                Text(String(localized: "settings.icloud.dev.badge"))
-                                    .font(.caption2.bold())
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(.orange, in: Capsule())
-                                #endif
+                                if AppIdentifiers.isCloudKitDevelopmentEnvironment {
+                                    Spacer()
+                                    Text(String(localized: "settings.icloud.dev.badge"))
+                                        .font(.caption2.bold())
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.orange, in: Capsule())
+                                }
                             }
                         }
 
@@ -356,6 +406,7 @@ struct SettingsView: View {
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case sources
+    case accounts
     case icloud
     case appearance
     case layoutNavigation
@@ -373,6 +424,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .sources: return String(localized: "sources.title")
+        case .accounts: return String(localized: "accounts.title")
         case .icloud: return String(localized: "settings.icloud.title")
         case .appearance: return String(localized: "settings.appearance.sectionTitle")
         case .layoutNavigation: return String(localized: "settings.layoutNavigation.title")
@@ -390,6 +442,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .sources: return "server.rack"
+        case .accounts: return "person.crop.circle"
         case .icloud: return "icloud"
         case .appearance: return "paintbrush"
         case .layoutNavigation: return "hand.tap"

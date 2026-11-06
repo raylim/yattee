@@ -8,37 +8,6 @@
 import Foundation
 import SwiftUI
 
-// MARK: - CommentsPillMode
-
-/// Controls how the comments pill is displayed in the player.
-enum CommentsPillMode: String, Codable, Hashable, Sendable, CaseIterable {
-    case pill       // Default - shows expanded pill, collapses on scroll
-    case button     // Always show collapsed (button-only)
-    case disabled   // No button/pill visible, no API query
-
-    /// Localized display name for settings UI.
-    var displayName: String {
-        switch self {
-        case .pill:
-            return String(localized: "commentsPill.mode.pill")
-        case .button:
-            return String(localized: "commentsPill.mode.button")
-        case .disabled:
-            return String(localized: "commentsPill.mode.disabled")
-        }
-    }
-
-    /// Whether comments should be loaded from the API.
-    var shouldLoadComments: Bool {
-        self != .disabled
-    }
-
-    /// Whether the comments pill should always be collapsed (button mode).
-    var alwaysCollapsed: Bool {
-        self == .button
-    }
-}
-
 // MARK: - PillVisibility
 
 /// Controls when the player pill is visible based on orientation.
@@ -62,10 +31,26 @@ enum PillVisibility: String, Codable, Hashable, Sendable, CaseIterable {
         }
     }
 
+    /// iPad treats the pill as on/off: both orientations show the video next
+    /// to a panel, the corner layout hosts the portrait panel in landscape,
+    /// and Split View windows make "portrait" mean "narrow" — so an
+    /// orientation split never matches what the user sees.
+    static var isOrientationAgnostic: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .pad
+        #else
+        return false
+        #endif
+    }
+
+    /// Whether the pill is enabled at all (any mode except `.never`).
+    var isEnabled: Bool { self != .never }
+
     /// Returns whether the pill should be visible for the given layout context.
     /// - Parameter isWideLayout: True if in wide/landscape layout, false for portrait.
     /// - Returns: Whether the pill should be shown.
     func isVisible(isWideLayout: Bool) -> Bool {
+        if Self.isOrientationAgnostic { return isEnabled }
         switch self {
         case .portraitOnly:
             return !isWideLayout
@@ -89,7 +74,9 @@ struct PlayerPillSettings: Codable, Hashable, Sendable {
     /// Ordered list of buttons to display in the pill.
     var buttons: [ControlButtonConfiguration]
 
-    /// How the comments pill should be displayed (optional for backward compatibility).
+    /// Legacy: the comments pill mode now lives on the comments page settings
+    /// (`CommentsPageSettings.pillMode`). Kept only so old presets decode;
+    /// `PlayerControlsLayout.effectivePanelSettings` migrates it.
     var commentsPillMode: CommentsPillMode?
 
     // MARK: - Initialization
@@ -102,28 +89,6 @@ struct PlayerPillSettings: Codable, Hashable, Sendable {
         self.visibility = visibility
         self.buttons = buttons
         self.commentsPillMode = commentsPillMode
-    }
-
-    // MARK: - Computed Properties
-
-    /// Returns the effective comments pill mode, defaulting to `.pill` when nil.
-    var effectiveCommentsPillMode: CommentsPillMode {
-        commentsPillMode ?? .pill
-    }
-
-    /// Whether comments should be loaded from the API.
-    var shouldLoadComments: Bool {
-        effectiveCommentsPillMode.shouldLoadComments
-    }
-
-    /// Whether the comments pill should always be shown collapsed.
-    var isCommentsPillAlwaysCollapsed: Bool {
-        effectiveCommentsPillMode.alwaysCollapsed
-    }
-
-    /// Whether the comments pill should be visible at all.
-    var shouldShowCommentsPill: Bool {
-        effectiveCommentsPillMode != .disabled
     }
 
     // MARK: - Mutation Helpers

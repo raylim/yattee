@@ -11,23 +11,14 @@ import SwiftUI
 /// View modifier that applies user-configurable swipe actions plus fixed context-specific actions.
 struct VideoSwipeActionsModifier: ViewModifier {
     @Environment(\.appEnvironment) private var appEnvironment
-    @Environment(\.videoQueueContext) private var queueContext
+    @Environment(\.presentAppSheet) private var presentAppSheet
 
     let video: Video
     var fixedActions: [SwipeAction] = []
 
-    @State private var showingPlaylistSheet = false
-    @State private var showingDownloadSheet = false
-
     func body(content: Content) -> some View {
         content
             .swipeActions(actionsArray: allActions())
-            .sheet(isPresented: $showingPlaylistSheet) {
-                PlaylistSelectorSheet(video: video)
-            }
-            .sheet(isPresented: $showingDownloadSheet) {
-                DownloadQualitySheet(video: video)
-            }
     }
 
     private var visibleActions: [VideoSwipeAction] {
@@ -104,7 +95,7 @@ struct VideoSwipeActionsModifier: ViewModifier {
                 tint: action.tint,
                 background: action.backgroundColor
             ) { reset in
-                showingPlaylistSheet = true
+                presentAppSheet(.addToPlaylist(video))
                 reset()
             }
 
@@ -191,12 +182,12 @@ struct VideoSwipeActionsModifier: ViewModifier {
     private func shareVideo() {
         #if os(iOS)
         let activityVC = UIActivityViewController(
-            activityItems: [video.shareURL],
+            activityItems: [appEnvironment?.shareURL(for: video) ?? video.shareURL],
             applicationActivities: nil
         )
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let window = windowScene.windows.first,
-           let rootVC = window.rootViewController {
+        // The key window is the expanded player's while it is up, so the
+        // share sheet opens above it rather than behind it.
+        if let rootVC = UIApplication.shared.foregroundWindow?.rootViewController {
             // Find the top-most view controller
             var topVC = rootVC
             while let presented = topVC.presentedViewController {
@@ -217,13 +208,13 @@ struct VideoSwipeActionsModifier: ViewModifier {
         #elseif os(macOS)
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(video.shareURL.absoluteString, forType: .string)
+        pasteboard.setString((appEnvironment?.shareURL(for: video) ?? video.shareURL).absoluteString, forType: .string)
         #endif
     }
 
     private func startDownload() {
         guard let appEnvironment else {
-            showingDownloadSheet = true
+            presentAppSheet(.downloadOptions(video))
             return
         }
 
@@ -277,7 +268,7 @@ struct VideoSwipeActionsModifier: ViewModifier {
                 }
             }
         } else {
-            showingDownloadSheet = true
+            presentAppSheet(.downloadOptions(video))
         }
     }
 }

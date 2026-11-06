@@ -11,6 +11,9 @@ struct ImportPlaylistsView: View {
     let instance: Instance
 
     @Environment(\.appEnvironment) private var appEnvironment
+    #if os(tvOS)
+    @Environment(\.dismiss) private var dismiss
+    #endif
 
     @State private var playlists: [Playlist] = []
     @State private var importedPlaylistIDs: Set<String> = []
@@ -21,10 +24,31 @@ struct ImportPlaylistsView: View {
     // Import progress state
     @State private var importingPlaylistID: String?
     @State private var importProgress: (current: Int, total: Int)?
+    /// Set when an import stopped because the login behind it changed, so a
+    /// batch stops with it: everything after would either be read under a
+    /// different account or leave an empty playlist behind for one that is
+    /// gone.
+    @State private var loginChangedDuringImport = false
+    /// The merge started from the confirmation dialog, which runs detached
+    /// from the batch that queued it. Held so the batch can wait for it.
+    @State private var mergeImportTask: Task<Void, Never>?
+    /// The credential the listed playlists were read with. Everything on
+    /// screen belongs to it, so every import is checked against this rather
+    /// than against whatever is current — a replacement is a different
+    /// person's account, and its playlist IDs mean something else entirely.
+    @State private var loadedCredential: String?
+    /// Which listing the imports in flight belong to. Reloading the list
+    /// invalidates them: they were chosen from rows that are being replaced,
+    /// and the credential they are checked against is about to move.
+    @State private var listGeneration = 0
 
     // Merge warning state
     @State private var showMergeWarning = false
     @State private var pendingMergePlaylist: Playlist?
+    /// The listing and login the pending merge was chosen from. The dialog
+    /// waits on the user, so both can be replaced before they answer it.
+    @State private var pendingMergeGeneration = 0
+    @State private var pendingMergeCredential = ""
     @State private var existingLocalPlaylist: LocalPlaylist?
 
     // MARK: - Accessibility Identifiers
@@ -87,7 +111,16 @@ struct ImportPlaylistsView: View {
             ) {
                 Button(String(localized: "import.playlists.mergeWarning.merge")) {
                     if let playlist = pendingMergePlaylist, let localPlaylist = existingLocalPlaylist {
-                        Task { await performImport(playlist, into: localPlaylist) }
+                        let generation = pendingMergeGeneration
+                        let credential = pendingMergeCredential
+                        mergeImportTask = Task {
+                            await performImport(
+                                playlist,
+                                into: localPlaylist,
+                                generation: generation,
+                                credential: credential
+                            )
+                        }
                     }
                 }
                 Button(String(localized: "common.cancel"), role: .cancel) {
@@ -147,11 +180,19 @@ struct ImportPlaylistsView: View {
     }
 
     private var emptyView: some View {
-        ContentUnavailableView(
-            String(localized: "import.playlists.emptyTitle"),
-            systemImage: "list.bullet.rectangle",
-            description: Text(String(localized: "import.playlists.emptyDescription"))
-        )
+        ContentUnavailableView {
+            Label(String(localized: "import.playlists.emptyTitle"), systemImage: "list.bullet.rectangle")
+        } description: {
+            Text(String(localized: "import.playlists.emptyDescription"))
+        } actions: {
+            #if os(tvOS)
+            // Nothing in the content is focusable here; the container's
+            // toolbar Done is not something to rely on to keep the remote free.
+            Button(String(localized: "common.done")) {
+                dismiss()
+            }
+            #endif
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier(AccessibilityID.emptyState)
     }
@@ -262,7 +303,7 @@ struct ImportPlaylistsView: View {
 
     private func loadPlaylists() async {
         guard let appEnvironment,
-              let credential = appEnvironment.credentialsManager(for: instance)?.credential(for: instance) else {
+              let credential = appEnvironment.credential(forInstance: instance) else {
             error = ImportError.notLoggedIn
             isLoading = false
             return
@@ -270,24 +311,31 @@ struct ImportPlaylistsView: View {
 
         isLoading = true
         error = nil
+        // Anything still importing was chosen from the rows being replaced.
+        listGeneration += 1
+        loginChangedDuringImport = false
+        // Its progress belongs to a row that is going away. Left set, the
+        // incoming listing renders it against whichever row carries that ID
+        // now — another account's playlist, shown as importing.
+        importingPlaylistID = nil
+        importProgress = nil
 
         do {
-            let fetchedPlaylists: [Playlist]
-
-            switch instance.type {
-            case .invidious:
-                let api = InvidiousAPI(httpClient: appEnvironment.httpClient)
-                fetchedPlaylists = try await api.userPlaylists(instance: instance, sid: credential)
-
-            case .piped:
-                let api = PipedAPI(httpClient: appEnvironment.httpClient)
-                fetchedPlaylists = try await api.userPlaylists(instance: instance, authToken: credential)
-
-            default:
+            guard instance.type.accountCapabilities.supportsPlaylistReads else {
                 throw ImportError.notSupported
             }
 
+            let fetchedPlaylists = try await appEnvironment.contentService.userPlaylists(
+                instance: instance,
+                credential: credential
+            )
+
             playlists = fetchedPlaylists.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+            // Recorded only now: the baseline is whichever login actually
+            // produced the rows on screen. A failed load leaves the previous
+            // one standing, so an import still running keeps being checked
+            // against the login that listed it.
+            loadedCredential = credential
 
             // Check which playlists are already imported (by matching title)
             let localPlaylists = appEnvironment.dataManager.playlists()
@@ -308,11 +356,27 @@ struct ImportPlaylistsView: View {
     private func addPlaylist(_ playlist: Playlist) async {
         guard let appEnvironment else { return }
 
+        // Both taken here rather than wherever the import eventually starts: a
+        // merge waits on the user, and by then the list may have been replaced
+        // and its credential re-recorded.
+        let generation = listGeneration
+
+        // Checked before anything is created: a playlist made for a login that
+        // has already gone would be left behind empty, because the import
+        // aborts on its first write.
+        guard let credential = appEnvironment.credential(forInstance: instance),
+              credential == loadedCredential else {
+            loginChangedDuringImport = true
+            return
+        }
+
         // Check if local playlist with same title exists
         let localPlaylists = appEnvironment.dataManager.playlists()
         if let existing = localPlaylists.first(where: { $0.title == playlist.title }) {
             // Show merge warning
             pendingMergePlaylist = playlist
+            pendingMergeGeneration = generation
+            pendingMergeCredential = credential
             existingLocalPlaylist = existing
             importingPlaylistID = playlist.id.playlistID
             showMergeWarning = true
@@ -321,13 +385,54 @@ struct ImportPlaylistsView: View {
 
         // Create new local playlist and import
         let localPlaylist = appEnvironment.dataManager.createPlaylist(title: playlist.title)
-        await performImport(playlist, into: localPlaylist)
+        let imported = await performImport(
+            playlist,
+            into: localPlaylist,
+            generation: generation,
+            credential: credential
+        )
+
+        // It is created before it is read, so anything that stops the read —
+        // a login that moved, but equally a server that did not answer —
+        // leaves it behind with nothing in it. An import that genuinely had
+        // nothing to add keeps its playlist; a failed one does not.
+        if !imported, localPlaylist.items?.isEmpty ?? true {
+            appEnvironment.dataManager.deletePlaylist(localPlaylist)
+        }
     }
 
-    private func performImport(_ playlist: Playlist, into localPlaylist: LocalPlaylist) async {
-        guard let appEnvironment,
-              let credential = appEnvironment.credentialsManager(for: instance)?.credential(for: instance) else {
-            return
+    /// - Parameters:
+    ///   - generation: the listing `playlist` was chosen from, taken at
+    ///     selection time. It decides only what may be marked imported — a
+    ///     reload replaces the rows, not the login.
+    ///   - credential: the login that listed `playlist`, taken at selection
+    ///     time. Reading it under any other would fetch whatever that ID
+    ///     happens to name to somebody else.
+    /// - Returns: whether the playlist was read and written in full.
+    @discardableResult
+    private func performImport(
+        _ playlist: Playlist,
+        into localPlaylist: LocalPlaylist,
+        generation: Int,
+        credential: String
+    ) async -> Bool {
+        guard let appEnvironment else { return false }
+
+        // The login can go, or be replaced, between choosing this playlist and
+        // reading it — the merge dialog in particular waits on the user.
+        // Returning quietly would leave the row importing forever and let a
+        // batch carry on.
+        guard appEnvironment.credential(forInstance: instance) == credential else {
+            loginChangedDuringImport = true
+            importingPlaylistID = nil
+            importProgress = nil
+            pendingMergePlaylist = nil
+            existingLocalPlaylist = nil
+            appEnvironment.toastManager.showError(
+                String(localized: "import.playlists.failed.title"),
+                subtitle: ImportError.loginChanged.localizedDescription
+            )
+            return false
         }
 
         importingPlaylistID = playlist.id.playlistID
@@ -336,29 +441,18 @@ struct ImportPlaylistsView: View {
         existingLocalPlaylist = nil
 
         do {
-            // Fetch full playlist with videos
-            let fullPlaylist: Playlist
-
-            switch instance.type {
-            case .invidious:
-                let api = InvidiousAPI(httpClient: appEnvironment.httpClient)
-                fullPlaylist = try await api.userPlaylist(
-                    id: playlist.id.playlistID,
-                    instance: instance,
-                    sid: credential
-                )
-
-            case .piped:
-                let api = PipedAPI(httpClient: appEnvironment.httpClient)
-                fullPlaylist = try await api.userPlaylist(
-                    id: playlist.id.playlistID,
-                    instance: instance,
-                    authToken: credential
-                )
-
-            default:
+            guard instance.type.accountCapabilities.supportsPlaylistReads else {
                 throw ImportError.notSupported
             }
+
+            // Fetch full playlist with videos. The snapshot's per-row identities
+            // are of no use to an import — nothing here is written back to the
+            // server — so only the playlist itself is taken.
+            let fullPlaylist = try await appEnvironment.contentService.userPlaylistSnapshot(
+                id: playlist.id.playlistID,
+                instance: instance,
+                credential: credential
+            ).playlist
 
             let videos = fullPlaylist.videos
             let total = videos.count
@@ -368,6 +462,18 @@ struct ImportPlaylistsView: View {
                 // Update progress
                 await MainActor.run {
                     importProgress = (current: index + 1, total: total)
+                }
+
+                // These videos are private to the login they were read with,
+                // and the destination is not: local playlists are shared by
+                // whoever uses the device and sync to iCloud. The sheet can be
+                // dismissed and somebody else signed in on the same server
+                // while this runs, so the credential is checked before every
+                // write rather than only at the start. What has already been
+                // written stays — it was imported under the login that asked
+                // for it.
+                guard appEnvironment.credential(forInstance: instance) == credential else {
+                    throw ImportError.loginChanged
                 }
 
                 // Skip if already in playlist
@@ -384,9 +490,17 @@ struct ImportPlaylistsView: View {
             }
 
             await MainActor.run {
-                importedPlaylistIDs.insert(playlist.id.playlistID)
                 importingPlaylistID = nil
                 importProgress = nil
+
+                // The list can be replaced after the last video is written —
+                // an empty remote playlist never reaches a check at all.
+                // Marking it imported would attach to whatever row carries
+                // that ID now, which on another account is a different
+                // playlist.
+                guard generation == listGeneration else { return }
+
+                importedPlaylistIDs.insert(playlist.id.playlistID)
 
                 if skippedCount > 0 {
                     appEnvironment.toastManager.showSuccess(
@@ -397,8 +511,13 @@ struct ImportPlaylistsView: View {
                     appEnvironment.toastManager.showSuccess(String(localized: "import.playlists.added.title"))
                 }
             }
+
+            return true
         } catch {
             await MainActor.run {
+                if error as? ImportError == .loginChanged {
+                    loginChangedDuringImport = true
+                }
                 importingPlaylistID = nil
                 importProgress = nil
                 appEnvironment.toastManager.showError(
@@ -406,25 +525,47 @@ struct ImportPlaylistsView: View {
                     subtitle: error.localizedDescription
                 )
             }
+
+            return false
         }
     }
 
     private func addAllPlaylists() async {
+        loginChangedDuringImport = false
+        let generation = listGeneration
+
         for playlist in unimportedPlaylists {
+            // The rows this batch is working through have been replaced, and
+            // the remaining ones no longer describe what is on screen.
+            guard generation == listGeneration else { break }
+
             await addPlaylist(playlist)
 
             // If merge warning is shown, wait for user interaction
             while showMergeWarning {
                 try? await Task.sleep(for: .milliseconds(100))
             }
+
+            // The merge the dialog starts is detached from it, so dismissing
+            // the dialog is not the merge finishing. Waiting keeps the batch
+            // sequential — and lets a login change the merge runs into stop
+            // the rest, rather than the next import beginning under whoever
+            // replaced it.
+            await mergeImportTask?.value
+            mergeImportTask = nil
+
+            // The rest of the batch belongs to a login that is no longer
+            // there. Reported once, by whichever import stopped first.
+            if loginChangedDuringImport { break }
         }
     }
 
     // MARK: - Errors
 
-    enum ImportError: LocalizedError {
+    enum ImportError: LocalizedError, Equatable {
         case notLoggedIn
         case notSupported
+        case loginChanged
 
         var errorDescription: String? {
             switch self {
@@ -432,6 +573,8 @@ struct ImportPlaylistsView: View {
                 return String(localized: "import.playlists.notLoggedIn")
             case .notSupported:
                 return String(localized: "import.playlists.notSupported")
+            case .loginChanged:
+                return String(localized: "import.playlists.loginChanged")
             }
         }
     }

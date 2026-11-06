@@ -39,6 +39,10 @@ struct PlayerControlsActions {
     #if os(iOS)
     /// Whether the side panel is pinned (iPad landscape)
     let isPanelPinned: Bool
+
+    /// Whether the corner layout is active: the fullscreen button then
+    /// toggles the panels (hide = fullscreen video, unhide on next press)
+    var isCornerLayout: Bool = false
     #endif
 
     /// Which side the panel is on
@@ -47,6 +51,24 @@ struct PlayerControlsActions {
     #if os(iOS)
     /// Whether running on iPad
     let isIPad: Bool
+
+    /// Whether the system honors programmatic rotation requests. False on the
+    /// iPhone Duo interior display, which then gets the iPad fullscreen
+    /// behavior (details toggle, no rotate glyph, no orientation lock).
+    var canRotate: Bool = true
+
+    /// Screen of the window hosting the controls; brightness targets it
+    /// (iPhone Duo interior and exterior are separate screens).
+    var screen: UIScreen?
+
+    /// iPad, or an iPhone windowing mode that can't rotate on request.
+    var usesRotationFreeFullscreen: Bool { isIPad || !canRotate }
+
+    /// Rotation-free fullscreen in a layout without a details toggle: the
+    /// button shows/hides the panel instead, so the icon tracks the panel.
+    var togglesPanelOnFullscreen: Bool {
+        usesRotationFreeFullscreen && onToggleDetailsVisibility == nil && onTogglePanel != nil
+    }
     #endif
 
     /// Whether volume controls should show (mpv mode)
@@ -77,9 +99,7 @@ struct PlayerControlsActions {
     let currentAudioStream: Stream?
 
     /// Embedded (in-container) tracks reported by mpv for the loaded file
-    var embeddedAudioTracks: [MPVTrack] = []
     var embeddedSubtitleTracks: [MPVTrack] = []
-    var currentEmbeddedAudioTrackID: Int? = nil
     var currentEmbeddedSubtitleTrackID: Int? = nil
 
     #if os(iOS)
@@ -118,6 +138,10 @@ struct PlayerControlsActions {
 
     /// Toggle details visibility (portrait fullscreen)
     var onToggleDetailsVisibility: (() -> Void)?
+
+    /// Hide the controls overlay (corner layout hides them before the
+    /// panel toggle so the controls-resize never plays visibly)
+    var onHideControls: (() -> Void)?
 
     #if os(iOS)
     /// Toggle orientation lock
@@ -212,11 +236,6 @@ struct PlayerControlsActions {
         return String(format: "%.2gx", rate.rawValue)
     }
 
-    /// Whether share is available (has video with share URL)
-    var canShare: Bool {
-        currentVideo != nil
-    }
-
     /// Whether add to playlist is available
     var canAddToPlaylist: Bool {
         guard let video = currentVideo else { return false }
@@ -263,6 +282,11 @@ struct PlayerControlsActions {
     /// Uses rotation icons when tapping will cause device rotation,
     /// otherwise uses standard fullscreen arrows.
     var fullscreenIcon: String {
+        if isCornerLayout || togglesPanelOnFullscreen {
+            // Corner layout / rotation-free widescreen: reflects the panel
+            // state, not orientation
+            return isPanelVisible ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left"
+        }
         if willRotateOnFullscreenToggle {
             if isFullscreen {
                 // Currently landscape fullscreen, will rotate to portrait
@@ -280,11 +304,26 @@ struct PlayerControlsActions {
     /// Shared fullscreen-tap decision used by the fullscreen button and tap gestures.
     /// Keep in sync with `willRotateOnFullscreenToggle` (icon mirror of this logic).
     func performFullscreenTap() {
+        if isCornerLayout {
+            // Corner layout: hide the controls and toggle the panels —
+            // the controls fade out while the panel transition plays
+            onHideControls?()
+            onTogglePanel?()
+            return
+        }
+
         let isActualWidescreenLayout = isWideScreenLayout && onTogglePanel != nil
 
-        if isIPad {
-            // iPad: always toggle details visibility
-            onToggleDetailsVisibility?()
+        if usesRotationFreeFullscreen {
+            // iPad (or no programmatic rotation): toggle details visibility.
+            // The widescreen layout has no details toggle — there fullscreen
+            // means hiding the floating panel, like the corner layout.
+            if let onToggleDetailsVisibility {
+                onToggleDetailsVisibility()
+            } else if togglesPanelOnFullscreen {
+                onHideControls?()
+                onTogglePanel?()
+            }
         } else if isActualWidescreenLayout && isFullscreen && !isWidescreenVideo {
             // iPhone in landscape with portrait video fullscreen: rotate back to portrait
             onToggleFullscreen?()
@@ -300,8 +339,9 @@ struct PlayerControlsActions {
     /// Whether tapping fullscreen will cause device rotation.
     /// Mirrors the logic in `performFullscreenTap()`
     var willRotateOnFullscreenToggle: Bool {
-        // iPad never rotates via fullscreen button
-        guard !isIPad else { return false }
+        // iPad never rotates via fullscreen button; neither does a windowing
+        // mode that refuses programmatic rotation
+        guard !usesRotationFreeFullscreen else { return false }
 
         let isActualWidescreenLayout = isWideScreenLayout && onTogglePanel != nil
 
@@ -334,7 +374,14 @@ struct PlayerControlsActions {
 
     /// Whether the fullscreen button should be shown
     var shouldShowFullscreenButton: Bool {
-        // iPad widescreen (true landscape): hidden (can't force rotation)
+        // Corner layout: always shown, toggles the panels both ways
+        if isCornerLayout {
+            return onTogglePanel != nil
+        }
+
+        // iPad widescreen (true landscape): hidden (can't force rotation).
+        // Only real iPads: a rotation-free iPhone (Duo interior) with the
+        // panel hidden still needs the button to bring the panel back.
         let isActualWidescreen = isWideScreenLayout && onTogglePanel != nil
         let showFullscreenButton = !(isIPad && isActualWidescreen)
         let hasFullscreenAction = onToggleFullscreen != nil || onToggleDetailsVisibility != nil

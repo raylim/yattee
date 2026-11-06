@@ -48,6 +48,8 @@ enum NavigationDestination: Hashable {
     case importSubscriptions(instance: Instance)
     /// Import playlists from an instance.
     case importPlaylists(instance: Instance)
+    /// Several links opened at once, resolved into mixed results.
+    case openedLinks([URL])
 }
 
 extension NavigationDestination {
@@ -92,21 +94,13 @@ extension NavigationDestination {
             ContinueWatchingView()
         case .downloads:
             #if os(tvOS)
-            ContentUnavailableView {
-                Label(String(localized: "home.downloads.title"), systemImage: "arrow.down.circle")
-            } description: {
-                Text(String(localized: "home.downloads.notAvailable"))
-            }
+            TVDownloadsUnavailableView(title: String(localized: "home.downloads.title"))
             #else
             DownloadsView()
             #endif
         case .downloadsStorage:
             #if os(tvOS)
-            ContentUnavailableView {
-                Label(String(localized: "settings.downloads.storage.title"), systemImage: "arrow.down.circle")
-            } description: {
-                Text(String(localized: "home.downloads.notAvailable"))
-            }
+            TVDownloadsUnavailableView(title: String(localized: "settings.downloads.storage.title"))
             #else
             DownloadsStorageView()
             #endif
@@ -149,9 +143,37 @@ extension NavigationDestination {
             ImportSubscriptionsView(instance: instance)
         case .importPlaylists(let instance):
             ImportPlaylistsView(instance: instance)
+        case .openedLinks(let urls):
+            OpenedLinksView(urls: urls)
         }
     }
 }
+
+#if os(tvOS)
+// MARK: - tvOS Downloads Placeholder
+
+/// What a downloads destination shows on tvOS, which has no downloads.
+///
+/// Reachable on tvOS through `yattee://downloads`. Without a focusable element
+/// the focus engine has nowhere to land and the remote is stuck, so it carries
+/// a Done that pops it.
+private struct TVDownloadsUnavailableView: View {
+    let title: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "arrow.down.circle")
+        } description: {
+            Text(String(localized: "home.downloads.notAvailable"))
+        } actions: {
+            Button(String(localized: "common.done")) {
+                dismiss()
+            }
+        }
+    }
+}
+#endif
 
 // MARK: - Media Source by ID View
 
@@ -168,6 +190,14 @@ private struct MediaSourceByIDView: View {
                 Label(String(localized: "navigation.sourceNotFound"), systemImage: "externaldrive.badge.exclamationmark")
             } description: {
                 Text(String(localized: "navigation.sourceNotFound.description"))
+            } actions: {
+                #if os(tvOS)
+                // Nothing else here is focusable, and as a sidebar source this
+                // is a tab root that Menu cannot pop.
+                Button(String(localized: "navigation.sourceNotFound.openSources")) {
+                    appEnvironment?.navigationCoordinator.router.select(.sources)
+                }
+                #endif
             }
         }
     }
@@ -185,6 +215,7 @@ struct NavigationDestinationHandlerModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .opaqueWindowBackground()
+            .miniPlayerBottomClearance()
             .navigationDestination(for: NavigationDestination.self) { destination in
                 Group {
                     if let transitionID = destination.transitionID {
@@ -195,7 +226,36 @@ struct NavigationDestinationHandlerModifier: ViewModifier {
                     }
                 }
                 .opaqueWindowBackground()
+                .miniPlayerBottomClearance()
             }
+    }
+}
+
+extension EnvironmentValues {
+    /// Height of the split view's floating mini player, which every page in
+    /// the detail column reserves as bottom safe area. Zero elsewhere.
+    @Entry var miniPlayerBottomClearance: CGFloat = 0
+}
+
+/// Reserves the floating mini player's height at the bottom of a page.
+private struct MiniPlayerBottomClearanceModifier: ViewModifier {
+    @Environment(\.miniPlayerBottomClearance) private var clearance
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        content
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Color.clear.frame(height: clearance)
+            }
+        #else
+        content
+        #endif
+    }
+}
+
+private extension View {
+    func miniPlayerBottomClearance() -> some View {
+        modifier(MiniPlayerBottomClearanceModifier())
     }
 }
 

@@ -26,6 +26,8 @@ struct VideoRowView: View {
     var index: Int? = nil
     /// When true, disables internal tap handling so parent view can handle all taps.
     var disableInternalTapHandling: Bool = false
+    /// When false, hides the thumbnail (e.g. details panel related page setting).
+    var showThumbnail: Bool = true
 
     // Platform-specific fonts
     #if os(tvOS)
@@ -70,6 +72,15 @@ struct VideoRowView: View {
     }
     #endif
 
+    private var accessibilityLabelText: String {
+        var parts = [video.displayTitle(using: appEnvironment?.deArrowBrandingProvider), video.author.name]
+        let duration = video.formattedDuration
+        if !duration.isEmpty {
+            parts.append(duration)
+        }
+        return parts.joined(separator: ", ")
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             // Index number (for playlists)
@@ -86,15 +97,17 @@ struct VideoRowView: View {
             }
             
             // Thumbnail
-            thumbnailView
-                .zoomTransitionSource(id: video.id)
+            if showThumbnail {
+                thumbnailView
+                    .zoomTransitionSource(id: video.id)
+            }
 
             // Info
             infoView
         }
         .contentShape(Rectangle())
         .accessibilityIdentifier("video.row.\(video.id.videoID)")
-        .accessibilityLabel("video.row.\(video.id.videoID)")
+        .accessibilityLabel(accessibilityLabelText)
     }
     
     @ViewBuilder

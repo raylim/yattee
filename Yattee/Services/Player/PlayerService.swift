@@ -103,17 +103,11 @@ final class PlayerService {
     /// The current download being played, if any.
     private(set) var currentDownload: Download?
 
-    /// Whether we're currently playing downloaded content.
-    var isPlayingDownloadedContent: Bool {
-        currentDownload != nil
-    }
-
     /// Whether online streams are currently being loaded.
     private(set) var isLoadingOnlineStreams: Bool = false
 
     // MARK: - Dependencies
 
-    private let httpClient: HTTPClient
     private let contentService: ContentService
     private let sponsorBlockAPI: SponsorBlockAPI
     private let returnYouTubeDislikeAPI: ReturnYouTubeDislikeAPI
@@ -128,6 +122,7 @@ final class PlayerService {
     private weak var queueManager: QueueManager?
     private weak var playerControlsLayoutService: PlayerControlsLayoutService?
     private weak var handoffManager: HandoffManager?
+    private weak var watchHistorySyncService: WatchHistorySyncService?
 
     // MARK: - Private State
 
@@ -136,6 +131,8 @@ final class PlayerService {
 
     private var progressSaveTimer: Timer?
     private let progressSaveInterval: TimeInterval = 5
+    /// Last position written by the periodic progress save.
+    private var lastSavedProgress: (videoID: String, seconds: TimeInterval)?
 
     /// Now Playing service for Control Center/Lock Screen.
     private let nowPlayingService = NowPlayingService()
@@ -146,9 +143,20 @@ final class PlayerService {
     /// Tracks the last skipped segment to prevent duplicate skips.
     private var lastSkippedSegmentID: String?
 
+    /// 5-second bucket of the last Now Playing elapsed-time update.
+    private var lastNowPlayingTimeBucket: Int?
+
     /// Tracks if the current video ended naturally (reached EOF).
     /// Used to prevent saving progress when switching to next video after natural completion.
     private var videoEndedNaturally = false
+
+    /// Bumped every time the playback identity changes hands: a load claiming
+    /// the player, or a teardown clearing it. Work that suspends mid-playback
+    /// captures it and compares on the way back, so a continuation belonging to
+    /// a watch that is over cannot act on the one that replaced it — including
+    /// when the replacement is the very same video, which an ID check alone
+    /// cannot tell apart.
+    private var playbackGeneration = 0
 
     /// Current playback task - cancelled when video is closed or new video is opened.
     private var currentPlayTask: Task<Void, Never>?
@@ -175,7 +183,6 @@ final class PlayerService {
         dataManager: DataManager,
         backendFactory: BackendFactory? = nil
     ) {
-        self.httpClient = httpClient
         self.contentService = contentService
         self.dataManager = dataManager
         self.sponsorBlockAPI = SponsorBlockAPI(httpClient: httpClient)
@@ -207,6 +214,27 @@ final class PlayerService {
                 factory?.drainPool()
             }
         }
+
+        // Stop re-rendering the hidden player UI on every time update while
+        // the app is in the background (see PlayerState.publishesTimeUpdates).
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.state.publishesTimeUpdates = false
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.state.publishesTimeUpdates = true
+            }
+        }
         #endif
     }
 
@@ -217,22 +245,6 @@ final class PlayerService {
     }
 
     // MARK: - Public Methods
-
-    /// Prepares a video for playback without loading streams.
-    /// Shows the video in the player with a play button overlay.
-    /// Call `play(video:)` to actually start loading and playing.
-    /// - Parameter video: The video to prepare
-    func prepare(video: Video) {
-        LoggingService.shared.logPlayer("Preparing video: \(video.id.id)")
-
-        // Clear streams
-        availableStreams = []
-        originalStreams = []
-
-        // Set video in state but keep idle (not loading)
-        state.setCurrentVideo(video, stream: nil)
-        state.setPlaybackState(.idle)
-    }
 
     /// Plays a video with optional starting time.
     /// - Parameters:
@@ -262,6 +274,18 @@ final class PlayerService {
         if state.currentVideo != nil && isNewVideo && !videoEndedNaturally {
             saveProgressAndSync()
         }
+
+        // Mirror this watch into the active account's server history.
+        // Unconditional, and the service decides: `isNewVideo` is already false
+        // for most openings, because openVideo() puts the video into state
+        // before this task runs. The service compares against the session it is
+        // holding instead, which keeps a reload of the same video — an
+        // audio-mode toggle, a quality switch, a stream retry — from posting it
+        // a second time.
+        watchHistorySyncService?.beginSessionIfNeeded(video: video)
+
+        // This load is the playback from here on
+        playbackGeneration += 1
 
         // Reset flag for the new video
         videoEndedNaturally = false
@@ -615,12 +639,20 @@ final class PlayerService {
     /// Reconciles sleep prevention with what is actually on screen: display sleep
     /// is only prevented when a video track is rendered. Audio-only playback
     /// lets the screen sleep normally.
+    ///
+    /// tvOS is the exception: idle there means screensaver and then device sleep,
+    /// which suspends the app, stops playback, and powers the TV off over CEC.
+    /// Audio-only playback must keep the idle timer disabled as well.
     private func updateSleepPrevention() {
+        #if os(tvOS)
+        sleepPreventionService.preventSleep()
+        #else
         if state.currentStream?.isAudioOnly == true {
             sleepPreventionService.allowSleep()
         } else {
             sleepPreventionService.preventSleep()
         }
+        #endif
     }
 
     /// Pauses playback.
@@ -651,12 +683,48 @@ final class PlayerService {
         } else if state.playbackState == .ended {
             // Restart from beginning when video has ended
             Task {
-                await seek(to: 0)
-                resume()
+                await replayCurrentVideo()
             }
         } else {
             resume()
         }
+    }
+
+    /// Plays the current video again from the beginning, as a new watch.
+    ///
+    /// Every way a *finished* video is started again comes through here: the
+    /// replay button, the end-of-queue overlay, repeat-one, play/pause on an
+    /// ended video. Each of those is a second watch of the same video, so the
+    /// mirroring session is started fresh and the video is posted to the
+    /// account's history again — which is what moves it back to the front.
+    /// Seeking to the start mid-video is not this, and does not pass here.
+    func replayCurrentVideo() async {
+        let video = state.currentVideo
+        if let video {
+            watchHistorySyncService?.beginSession(video: video)
+        }
+
+        // The end of the previous watch left the player set up for a video that
+        // is over: no save timer, and the natural-end flag that tells play() the
+        // final save is already done. A second watch has to undo both, in the
+        // order play() does it — the flag before the seek, the timer only once
+        // playback is running again, so a seek that never gets there cannot
+        // leave a timer saving progress for an ended video.
+        videoEndedNaturally = false
+
+        let generation = playbackGeneration
+        await seek(to: 0)
+
+        // The seek is awaited, and the player can have moved on while it ran:
+        // stopped, playing something else, or stopped and given this same video
+        // a fresh start — which the id alone cannot tell from our own watch.
+        // Only the replay that is still the current playback may resume and arm
+        // the save timer — otherwise this would unpause a video the user paused
+        // or is still loading, or time saves for a watch that is not this one.
+        guard let video, playbackGeneration == generation, state.currentVideo?.id == video.id else { return }
+
+        resume()
+        startProgressSaveTimer()
     }
 
     /// Stops playback and clears the player.
@@ -672,6 +740,7 @@ final class PlayerService {
         currentPlayTask = nil
 
         saveProgressAndSync()
+        watchHistorySyncService?.endSession()
         cleanup()
 
         // Clear Handoff activity
@@ -797,9 +866,8 @@ final class PlayerService {
         // Handle queue mode behavior
         switch state.queueMode {
         case .repeatOne:
-            // Restart current video
-            await seek(to: 0)
-            resume()
+            // Restart current video — a second watch of it, not a continuation
+            await replayCurrentVideo()
             return
 
         case .repeatAll:
@@ -1088,6 +1156,9 @@ final class PlayerService {
         // Cancel any previous play task before starting a new one
         currentPlayTask?.cancel()
 
+        // The opening owns the player from here, before the load task even runs
+        playbackGeneration += 1
+
         // Set video info before expanding so the sheet animates with content visible
         state.setPlaybackState(.loading)
         state.setCurrentVideo(video, stream: nil)
@@ -1131,6 +1202,9 @@ final class PlayerService {
 
         // Cancel any previous play task before starting a new one
         currentPlayTask?.cancel()
+
+        // The opening owns the player from here, before the load task even runs
+        playbackGeneration += 1
 
         // Set video info before expanding so the sheet animates with content visible
         state.setPlaybackState(.loading)
@@ -1714,113 +1788,6 @@ final class PlayerService {
 
     // MARK: - Media Browser Stream Resolution
 
-    /// Resolves stream and captions for a media browser video on-demand.
-    /// - Parameters:
-    ///   - video: The video to resolve
-    ///   - context: Media browser context with source and folder files
-    /// - Returns: Tuple of (stream, captions) ready for playback
-    func resolveMediaBrowserStream(
-        for video: Video,
-        context: MediaBrowserQueueContext
-    ) async throws -> (stream: Stream, captions: [Caption]) {
-        // Find the MediaFile for this video in the folder
-        // videoID format: "sourceUUID:path"
-        guard let mediaFile = context.allFilesInFolder.first(where: { $0.id == video.id.videoID }) else {
-            throw MediaSourceError.pathNotFound("Video file not found in folder context")
-        }
-
-        // Find matching subtitle files
-        let subtitleFiles = mediaFile.findMatchingSubtitles(in: context.allFilesInFolder)
-
-        let source = context.source
-        let password = mediaSourcesManager?.password(for: source)
-
-        switch source.type {
-        case .webdav:
-            // Get auth headers for WebDAV
-            var authHeaders: [String: String]?
-            if let webDAVClient {
-                authHeaders = await webDAVClient.authHeaders(for: source, password: password)
-            }
-            let stream = mediaFile.toStream(authHeaders: authHeaders)
-            // Subtitles can use remote URLs directly for WebDAV
-            return (stream, subtitleFiles)
-
-        case .smb:
-            guard let smbClient else {
-                throw MediaSourceError.unknown("SMB client not available")
-            }
-
-            let folderKey = source.id.uuidString + ":" + context.folderPath
-
-            // Pre-download ALL subtitles in folder on first access.
-            // Must complete before MPV opens any SMB connection.
-            // For queued videos from the same folder, subtitles will already be cached.
-            if !preDownloadedSubtitleFolders.contains(folderKey) {
-                let allSubtitleFiles = context.allFilesInFolder.filter { $0.isSubtitle }
-                LoggingService.shared.logMediaSources("Pre-downloading \(allSubtitleFiles.count) subtitle(s) from folder: \(context.folderPath)")
-
-                for subtitleFile in allSubtitleFiles {
-                    do {
-                        let localURL = try await smbClient.downloadSubtitleToTemp(
-                            file: subtitleFile,
-                            source: source,
-                            password: password,
-                            videoID: folderKey
-                        )
-                        downloadedSubtitlesCache[subtitleFile.id] = localURL
-                        LoggingService.shared.logMediaSources("Pre-downloaded subtitle: \(subtitleFile.name) → \(localURL.lastPathComponent)")
-                    } catch {
-                        LoggingService.shared.error(
-                            "Failed to pre-download subtitle \(subtitleFile.name): \(error.localizedDescription)",
-                            category: .general
-                        )
-                    }
-                }
-
-                preDownloadedSubtitleFolders.insert(folderKey)
-
-                // Release app SMB context before MPV opens its connection.
-                // libsmbclient uses process-global talloc state that corrupts
-                // when two contexts access the same server concurrently.
-                await smbClient.clearCache(for: source)
-                LoggingService.shared.logMediaSources("Cleared SMB context cache before playback")
-            }
-
-            // Construct video playback URL (pure string manipulation, no libsmbclient)
-            let playbackURL = try await smbClient.constructPlaybackURL(
-                for: mediaFile,
-                source: source,
-                password: password
-            )
-            let stream = Stream(url: playbackURL, resolution: nil, format: mediaFile.fileExtension)
-
-            // Build captions from pre-downloaded local files
-            var localCaptions: [Caption] = []
-            for subtitle in subtitleFiles {
-                if let subtitleFile = context.allFilesInFolder.first(where: { $0.url == subtitle.url }),
-                   let localURL = downloadedSubtitlesCache[subtitleFile.id] {
-                    localCaptions.append(Caption(
-                        label: subtitle.label,
-                        languageCode: subtitle.languageCode,
-                        url: localURL
-                    ))
-                    LoggingService.shared.info(
-                        "Using pre-downloaded subtitle: \(subtitleFile.name)",
-                        category: .general
-                    )
-                }
-            }
-
-            return (stream, localCaptions)
-
-        case .localFolder:
-            // Local folder - no auth needed, use file:// URLs directly
-            let stream = mediaFile.toStream(authHeaders: nil)
-            return (stream, subtitleFiles)
-        }
-    }
-
     /// Resolves stream and subtitles for a media source video by fetching folder contents on-demand.
     /// Works for all media source types (WebDAV, SMB, local folders) from any playback source
     /// (Media Browser, Continue Watching, etc.).
@@ -2108,6 +2075,16 @@ final class PlayerService {
                 || extractor == MediaFile.localFolderProvider
                 || extractor == MediaFile.smbProvider {
                 let stream = try await createStreamForMediaSource(video: video, url: originalURL, extractor: extractor)
+                return (video, [stream], [], [])
+            }
+
+            // Direct media (a file mpv plays as-is): rebuild the stream from the
+            // URL. A probe fills in the format/size for opaque CDN links; if it
+            // fails (offline, expired token) still hand mpv the URL and let it
+            // report the real error.
+            if extractor == DirectMediaHelper.provider {
+                let probe = await DirectMediaProbe.probe(originalURL)
+                let stream = DirectMediaHelper.createStream(from: originalURL, probe: probe)
                 return (video, [stream], [], [])
             }
         }
@@ -2607,7 +2584,6 @@ final class PlayerService {
     func setSettingsManager(_ manager: SettingsManager) {
         self.settingsManager = manager
         self.backendSwitcher.settingsManager = manager
-        self.nowPlayingService.settingsManager = manager
         // Reconfigure remote commands now that we have settings
         nowPlayingService.configureRemoteCommands()
         // Note: preferredBackendType is now computed directly from settingsManager
@@ -2696,6 +2672,11 @@ final class PlayerService {
     /// Sets the handoff manager for activity updates.
     func setHandoffManager(_ manager: HandoffManager) {
         self.handoffManager = manager
+    }
+
+    /// Sets the service that mirrors playback into an account's server history.
+    func setWatchHistorySyncService(_ service: WatchHistorySyncService) {
+        self.watchHistorySyncService = service
     }
 
     #if os(iOS)
@@ -2820,15 +2801,39 @@ final class PlayerService {
     }
 
     private func saveProgress() {
+        PerfCounter.count("player.progressSave")
         guard settingsManager?.incognitoModeEnabled != true,
               settingsManager?.saveWatchHistory != false else { return }
 
         guard let video = state.currentVideo,
               state.currentTime > 0 else { return }
 
+        // A paused player keeps the timer running; rewriting the same position
+        // only adds database writes, including while the app is being suspended.
+        let position = (videoID: video.id.videoID, seconds: state.currentTime)
+        guard lastSavedProgress?.videoID != position.videoID
+            || lastSavedProgress?.seconds != position.seconds else { return }
+        lastSavedProgress = position
+
         // Save locally only during playback - no iCloud sync overhead.
         // Live streams still get a history entry, but no resume position.
+        #if os(iOS)
+        // In the background (audio playback) the app can be suspended the
+        // moment playback stops. Suspending mid-save holds the SQLite lock in
+        // the shared app-group container and iOS kills the app with
+        // 0xdead10cc, so keep it running until the save has committed.
+        var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+        if UIApplication.shared.applicationState != .active {
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SaveWatchProgress")
+        }
+        defer {
+            if backgroundTask != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTask)
+            }
+        }
+        #endif
         dataManager.updateWatchProgressLocal(for: video, seconds: state.currentTime, duration: state.duration, isLive: state.isLive)
+        watchHistorySyncService?.recordProgress(videoID: video.id.videoID)
 
         // Update Handoff activity with current playback time
         handoffManager?.updatePlaybackTime(state.currentTime)
@@ -2855,6 +2860,7 @@ final class PlayerService {
         // This is the only save for a naturally finished video — play() skips
         // saveProgressAndSync() when videoEndedNaturally is set.
         dataManager.updateWatchProgress(for: video, seconds: completedDuration, duration: completedDuration)
+        watchHistorySyncService?.recordProgress(videoID: video.id.videoID)
 
         // Update Handoff activity with completed time
         handoffManager?.updatePlaybackTime(completedDuration)
@@ -2871,6 +2877,7 @@ final class PlayerService {
 
         // Save and queue for iCloud sync (used when video closes/switches)
         dataManager.updateWatchProgress(for: video, seconds: state.currentTime, duration: state.duration, isLive: state.isLive)
+        watchHistorySyncService?.recordProgress(videoID: video.id.videoID)
         NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
     }
 
@@ -2881,6 +2888,7 @@ final class PlayerService {
     }
 
     private func checkSponsorBlockSegments(at time: Double) {
+        PerfCounter.count("player.sponsorBlockCheck")
         // Read settings - use defaults if settings manager not available
         let enabled = settingsManager?.sponsorBlockEnabled ?? true
         let enabledCategories = settingsManager?.sponsorBlockCategories ?? SponsorBlockCategory.defaultEnabled
@@ -2901,7 +2909,9 @@ final class PlayerService {
                 }
             }
         } else {
-            state.currentSegment = nil
+            if state.currentSegment != nil {
+                state.currentSegment = nil
+            }
             // Clear last skipped when not in any segment (allows re-skip if user seeks back)
             lastSkippedSegmentID = nil
         }
@@ -2927,6 +2937,9 @@ final class PlayerService {
     }
 
     private func cleanup() {
+        // Whatever was playing is gone from here on
+        playbackGeneration += 1
+
         // Clean up temp subtitle files for current video
         if let currentVideo = state.currentVideo {
             cleanupTempSubtitles(for: currentVideo.id.id)
@@ -2934,6 +2947,7 @@ final class PlayerService {
 
         progressSaveTimer?.invalidate()
         progressSaveTimer = nil
+        lastNowPlayingTimeBucket = nil
 
         // Remove audio session interruption observer
         #if os(iOS) || os(tvOS)
@@ -3043,9 +3057,12 @@ extension PlayerService: PlayerBackendDelegate {
         delegate?.playerService(self, didUpdateTime: time)
         checkSponsorBlockSegments(at: time)
 
-        // Update Now Playing time periodically (every ~5 seconds to avoid excessive updates)
-        let shouldUpdateNowPlaying = Int(time) % 5 == 0
-        if shouldUpdateNowPlaying {
+        // Update Now Playing time once per 5-second bucket. Time updates arrive
+        // every frame, so a plain `Int(time) % 5 == 0` check would fire for every
+        // frame of that second.
+        let nowPlayingBucket = Int(time) / 5
+        if nowPlayingBucket != lastNowPlayingTimeBucket {
+            lastNowPlayingTimeBucket = nowPlayingBucket
             nowPlayingService.updatePlaybackTime(
                 currentTime: time,
                 duration: state.duration,
@@ -3092,10 +3109,6 @@ extension PlayerService: PlayerBackendDelegate {
         }
     }
 
-    func backend(_ backend: any PlayerBackend, didEncounterError error: Error) {
-        delegate?.playerService(self, didEncounterError: error)
-    }
-
     func backend(_ backend: any PlayerBackend, didUpdateVideoSize width: Int, height: Int) {
         guard width > 0, height > 0 else { return }
         let aspectRatio = Double(width) / Double(height)
@@ -3132,6 +3145,17 @@ extension PlayerService: PlayerBackendDelegate {
         state.isFirstFrameReady = true
     }
 
+    func backendDidFallBackToSoftwareDecoding(_ backend: any PlayerBackend) {
+        toastManager?.show(
+            category: .playerStatus,
+            title: String(localized: "toast.player.hwdecFallback.title"),
+            subtitle: String(localized: "toast.player.hwdecFallback.subtitle"),
+            icon: "cpu",
+            iconColor: .orange,
+            autoDismissDelay: 8.0
+        )
+    }
+
     func backendDidFinishPlaying(_ backend: any PlayerBackend) {
         // Mark that video ended naturally - prevents play() from saving progress again
         // when switching to next video (100% is already saved below)
@@ -3144,6 +3168,19 @@ extension PlayerService: PlayerBackendDelegate {
 
         state.setPlaybackState(.ended)
         saveProgressAsCompleted()
+
+        // The watch is over, so the session ends with it — after the completion
+        // save, which is the last progress this session has to mirror. A
+        // finished watch's session must not be left standing to absorb a future
+        // watch of the same video: the next load of it would otherwise reach
+        // `beginSessionIfNeeded`, recognise the video, keep the already-posted
+        // session and never mirror the second watch. Every way a finished video
+        // is played again on purpose starts a session of its own —
+        // `replayCurrentVideo()` explicitly, any other load through
+        // `beginSessionIfNeeded`. Ending the session does not touch a post
+        // already in flight.
+        watchHistorySyncService?.endSession()
+
         delegate?.playerServiceDidFinishPlaying(self)
 
         // Repeat one: restart immediately - no countdown, independent of queue contents

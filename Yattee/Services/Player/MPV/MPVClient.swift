@@ -252,6 +252,10 @@ final class MPVClient: @unchecked Sendable {
 
         let line = MPVLogLine(prefix: prefix, level: level, text: text)
 
+        if prefix == "ao/avfoundation", text.hasPrefix("restarting due to system notification") {
+            reloadAudioOutputIfPaused()
+        }
+
         logBufferLock.lock()
         recentLogBuffer.append(line)
         if recentLogBuffer.count > recentLogBufferCapacity {
@@ -274,6 +278,22 @@ final class MPVClient: @unchecked Sendable {
             if level == "info" || rendererRelevant {
                 Task { @MainActor in LoggingService.shared.logMPV(formatted) }
             }
+        }
+    }
+
+    /// mpv's avfoundation AO restarts its renderer on route changes and automatic
+    /// flushes, and the restart always starts it (synchronizer rate 1, requesting
+    /// data) even while paused. Paused mpv supplies no samples, so the empty
+    /// renderer re-requests in a tight loop on its dispatch queue (~35% CPU), and
+    /// the running renderer keeps iOS from suspending the app in the background.
+    /// Reloading the AO rebuilds it in the paused state.
+    private func reloadAudioOutputIfPaused() {
+        mpvQueue.async { [weak self] in
+            guard let self, let mpv = self.mpv, !self.isDestroyed else { return }
+            var paused: Int32 = 0
+            guard mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &paused) >= 0, paused != 0 else { return }
+            self.logWarning("avfoundation AO restarted while paused - reloading audio output")
+            _ = self.commandUnsafe(["ao-reload"])
         }
     }
 
@@ -506,28 +526,20 @@ final class MPVClient: @unchecked Sendable {
 
         // Audio
         setOptionSync("audio-client-name", "Yattee")
-        #if os(tvOS)
-        // Prefer avfoundation (AVSampleBufferAudioRenderer): audiounit can't open
-        // 32-channel HDMI routes (Atmos "Continuous Audio Output") and stays silent.
-        // mpv falls back to audiounit if avfoundation fails to initialize.
+        // Prefer avfoundation (AVSampleBufferAudioRenderer) everywhere: it is the
+        // system media path, so it gets Spatial Audio / "Spatialize Stereo" and
+        // head tracking, which audiounit/coreaudio output never does.
+        // tvOS: audiounit also can't open 32-channel HDMI routes (Atmos
+        // "Continuous Audio Output") and stays silent.
+        // macOS: coreaudio fails to initialize on macOS 27 ("unable to set the
+        // input channel layout on the audio unit … -50"), and its failed init
+        // leaks a HAL hotplug listener that crashes (use-after-free) on the next
+        // audio device change — so coreaudio must stay second in the list.
+        // mpv falls back to the second AO if avfoundation fails to initialize.
+        #if os(macOS)
+        setOptionSync("ao", "avfoundation,coreaudio")
+        #else
         setOptionSync("ao", "avfoundation,audiounit")
-        #elseif os(iOS)
-        setOptionSync("ao", "audiounit")
-        #elseif os(macOS)
-        // coreaudio is the native macOS AO, but on macOS 27 beta it fails to
-        // initialize ("unable to set the input channel layout on the audio
-        // unit … -50"), leaving playback silent. Worse, mpv's coreaudio AO
-        // registers a HAL hotplug listener before the step that fails and its
-        // init-failure path never unregisters it, so every failed init leaves
-        // a dangling listener that crashes (use-after-free) on the next audio
-        // device change. On macOS 27+ put avfoundation first so the failing
-        // coreaudio init never runs; older macOS keeps native coreaudio with
-        // avfoundation as fallback.
-        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
-            setOptionSync("ao", "avfoundation,coreaudio")
-        } else {
-            setOptionSync("ao", "coreaudio,avfoundation")
-        }
         #endif
 
         // Cache settings for network streams
@@ -636,8 +648,6 @@ final class MPVClient: @unchecked Sendable {
         observeProperty("demuxer-cache-time", format: MPV_FORMAT_DOUBLE)
         observeProperty("demuxer-cache-state", format: MPV_FORMAT_NODE)
         observeProperty("speed", format: MPV_FORMAT_DOUBLE)
-        observeProperty("volume", format: MPV_FORMAT_DOUBLE)
-        observeProperty("mute", format: MPV_FORMAT_FLAG)
         observeProperty("core-idle", format: MPV_FORMAT_FLAG)
         observeProperty("seeking", format: MPV_FORMAT_FLAG)
         // Cache-related properties for debugging playback start issues
@@ -659,16 +669,6 @@ final class MPVClient: @unchecked Sendable {
         observeProperty("track-list", format: MPV_FORMAT_NONE)
         observeProperty("aid", format: MPV_FORMAT_STRING)
         observeProperty("sid", format: MPV_FORMAT_STRING)
-    }
-
-    // MARK: - Options
-
-    /// Set an MPV option (must be called before initialize or after load).
-    func setOption(_ name: String, _ value: String) {
-        mpvQueue.async { [weak self] in
-            guard let mpv = self?.mpv else { return }
-            mpv_set_option_string(mpv, name, value)
-        }
     }
 
     // MARK: - Playback Control
@@ -788,38 +788,13 @@ final class MPVClient: @unchecked Sendable {
         command(["stop"])
     }
 
-    /// Seek to a specific time in seconds.
-    func seek(to time: Double, mode: String = "absolute") {
-        command(["seek", String(time), mode])
-    }
-
     /// Seek to a specific time in seconds asynchronously (non-blocking).
     /// Use this to avoid blocking the calling thread during seeks.
     func seekAsync(to time: Double, mode: String = "absolute") {
         commandAsync(["seek", String(time), mode])
     }
 
-    /// Seek by a relative offset in seconds.
-    func seekRelative(_ offset: Double) {
-        command(["seek", String(offset), "relative"])
-    }
-
-    /// Seek by a relative offset in seconds asynchronously (non-blocking).
-    func seekRelativeAsync(_ offset: Double) {
-        commandAsync(["seek", String(offset), "relative"])
-    }
-
     // MARK: - Subtitles
-
-    /// Add an external subtitle file.
-    /// - Parameters:
-    ///   - url: The subtitle URL (VTT, SRT, etc.)
-    ///   - select: Whether to automatically select this subtitle
-    func addSubtitle(_ url: URL, select: Bool = true) {
-        // sub-add <url> [<flags> [<title> [<lang>]]]
-        let flags = select ? "select" : "auto"
-        command(["sub-add", url.absoluteString, flags])
-    }
 
     /// Add an external subtitle file asynchronously (does not block caller).
     /// Use this for remote URLs to avoid blocking the UI during download.
@@ -834,16 +809,6 @@ final class MPVClient: @unchecked Sendable {
     /// Disable subtitles (set sid to "no").
     func disableSubtitles() {
         setProperty("sid", "no")
-    }
-
-    /// Enable subtitles by selecting the first track (if any).
-    func enableSubtitles() {
-        setProperty("sid", "auto")
-    }
-
-    /// Remove all external subtitle tracks.
-    func removeAllSubtitles() {
-        command(["sub-remove"])
     }
 
     /// Remove all external subtitle tracks asynchronously.
@@ -944,11 +909,52 @@ final class MPVClient: @unchecked Sendable {
         }
     }
 
-    /// Set a property value synchronously. Use when timing is critical.
-    func setPropertySync(_ name: String, _ value: Any) {
-        mpvQueue.sync { [weak self] in
-            self?.setPropertyUnsafe(name, value)
+    /// Desired volume (0–100) and mute state; only touched on mpvQueue.
+    private var desiredVolume: Double = 100
+    private var desiredMute = false
+
+    /// Set the playback volume (0–100) and mute state.
+    ///
+    /// mpv's `volume`/`mute` properties are software volume applied before
+    /// samples reach the AO, so with avfoundation (AVSampleBufferAudioRenderer
+    /// queues ~2s ahead) changes are heard only after the queue drains. When
+    /// avfoundation is active, drive the renderer via `ao-volume`/`ao-mute`
+    /// instead (instant) and keep software volume neutral. Other AOs
+    /// (audiounit/coreaudio) keep using software volume.
+    func setVolume(_ volume: Double, muted: Bool) {
+        mpvQueue.async { [weak self] in
+            guard let self else { return }
+            self.desiredVolume = volume
+            self.desiredMute = muted
+            self.applyVolumeUnsafe()
         }
+    }
+
+    /// Must be called on mpvQueue. Re-run on every audio reconfig, since a new
+    /// AO instance (new renderer) starts at full volume.
+    private func applyVolumeUnsafe() {
+        guard let mpv, !isDestroyed else { return }
+
+        var currentAo: String?
+        if let cString = mpv_get_property_string(mpv, "current-ao") {
+            currentAo = String(cString: cString)
+            mpv_free(cString)
+        }
+
+        var softVolume = desiredVolume
+        var softMute: Int32 = desiredMute ? 1 : 0
+        if currentAo == "avfoundation" {
+            var aoVolume = desiredVolume
+            var aoMute: Int32 = desiredMute ? 1 : 0
+            let volumeResult = mpv_set_property(mpv, "ao-volume", MPV_FORMAT_DOUBLE, &aoVolume)
+            let muteResult = mpv_set_property(mpv, "ao-mute", MPV_FORMAT_FLAG, &aoMute)
+            if volumeResult >= 0 && muteResult >= 0 {
+                softVolume = 100
+                softMute = 0
+            }
+        }
+        mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &softVolume)
+        mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &softMute)
     }
 
     /// Internal property setter (must be called on mpvQueue).
@@ -1014,116 +1020,6 @@ final class MPVClient: @unchecked Sendable {
         // Free the strdup'd strings
         for node in nodeList {
             free(node.u.string)
-        }
-    }
-
-    /// Get a double property value.
-    /// **⚠️ BLOCKS CALLING THREAD** - Use getDoubleAsync() from @MainActor code.
-    func getDouble(_ name: String) -> Double? {
-        mpvQueue.sync {
-            guard let mpv, !isDestroyed else { return nil }
-
-            var value: Double = 0
-            let result = mpv_get_property(mpv, name, MPV_FORMAT_DOUBLE, &value)
-            return result >= 0 ? value : nil
-        }
-    }
-
-    /// Get a boolean property value.
-    /// **⚠️ BLOCKS CALLING THREAD** - Use getFlagAsync() from @MainActor code.
-    func getFlag(_ name: String) -> Bool? {
-        mpvQueue.sync {
-            guard let mpv, !isDestroyed else { return nil }
-
-            var value: Int32 = 0
-            let result = mpv_get_property(mpv, name, MPV_FORMAT_FLAG, &value)
-            return result >= 0 ? (value != 0) : nil
-        }
-    }
-
-    /// Get a string property value.
-    /// **⚠️ BLOCKS CALLING THREAD** - Use getStringAsync() from @MainActor code.
-    func getString(_ name: String) -> String? {
-        mpvQueue.sync {
-            guard let mpv, !isDestroyed else { return nil }
-
-            guard let cString = mpv_get_property_string(mpv, name) else {
-                return nil
-            }
-            let string = String(cString: cString)
-            mpv_free(cString)
-            return string
-        }
-    }
-
-    /// Get an integer property value.
-    /// **⚠️ BLOCKS CALLING THREAD** - Use getIntAsync() from @MainActor code.
-    func getInt(_ name: String) -> Int? {
-        mpvQueue.sync {
-            guard let mpv, !isDestroyed else { return nil }
-
-            var value: Int64 = 0
-            let result = mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value)
-            return result >= 0 ? Int(value) : nil
-        }
-    }
-
-    /// Get the demuxer cache state.
-    /// **⚠️ BLOCKS CALLING THREAD** - Use getCacheStateAsync() from @MainActor code.
-    func getCacheState() -> MPVCacheState? {
-        mpvQueue.sync {
-            guard let mpv, !isDestroyed else { return nil }
-
-            var node = mpv_node()
-            let result = mpv_get_property(mpv, "demuxer-cache-state", MPV_FORMAT_NODE, &node)
-            guard result >= 0 else {
-                return nil
-            }
-
-            defer {
-                mpv_free_node_contents(&node)
-            }
-
-            return parseCacheStateSync(node)
-        }
-    }
-
-    /// Get MPV version and build information.
-    /// **⚠️ BLOCKS CALLING THREAD** - Use getVersionInfoAsync() from @MainActor code.
-    func getVersionInfo() -> MPVVersionInfo? {
-        mpvQueue.sync {
-            guard let mpv, !isDestroyed else { return nil }
-
-            // Get mpv-version property
-            var mpvVersion: String?
-            if let cString = mpv_get_property_string(mpv, "mpv-version") {
-                mpvVersion = String(cString: cString)
-                mpv_free(cString)
-            }
-
-            // Get ffmpeg-version property
-            var ffmpegVersion: String?
-            if let cString = mpv_get_property_string(mpv, "ffmpeg-version") {
-                ffmpegVersion = String(cString: cString)
-                mpv_free(cString)
-            }
-
-            // Get mpv-configuration property (compilation flags)
-            var configuration: String?
-            if let cString = mpv_get_property_string(mpv, "mpv-configuration") {
-                configuration = String(cString: cString)
-                mpv_free(cString)
-            }
-
-            // Get libmpv API version
-            let apiVersion = mpv_client_api_version()
-
-            return MPVVersionInfo(
-                mpvVersion: mpvVersion,
-                ffmpegVersion: ffmpegVersion,
-                configuration: configuration,
-                apiVersion: UInt(apiVersion)
-            )
         }
     }
 
@@ -1267,9 +1163,6 @@ final class MPVClient: @unchecked Sendable {
     }
 
     /// Get a double property value asynchronously (non-blocking).
-    /// Use this from MainActor code instead of getDouble() to avoid blocking the UI.
-    /// - Parameter name: The property name (e.g., "time-pos", "duration")
-    /// - Returns: The double value, or nil if the property doesn't exist or MPV is destroyed
     func getDoubleAsync(_ name: String) async -> Double? {
         await withCheckedContinuation { continuation in
             mpvQueue.async { [weak self] in
@@ -1285,66 +1178,16 @@ final class MPVClient: @unchecked Sendable {
     }
 
     /// Get a string property value asynchronously (non-blocking).
-    /// Use this from MainActor code instead of getString() to avoid blocking the UI.
-    /// - Parameter name: The property name (e.g., "video-codec", "hwdec-current")
-    /// - Returns: The string value, or nil if the property doesn't exist or MPV is destroyed
     func getStringAsync(_ name: String) async -> String? {
         await withCheckedContinuation { continuation in
             mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv, !self.isDestroyed else {
+                guard let self, let mpv = self.mpv, !self.isDestroyed,
+                      let cString = mpv_get_property_string(mpv, name) else {
                     continuation.resume(returning: nil)
                     return
                 }
-                guard let cString = mpv_get_property_string(mpv, name) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let string = String(cString: cString)
-                mpv_free(cString)
-                continuation.resume(returning: string)
-            }
-        }
-    }
-
-    /// Get an integer property value asynchronously (non-blocking).
-    /// Use this from MainActor code instead of getInt() to avoid blocking the UI.
-    /// - Parameter name: The property name (e.g., "width", "height")
-    /// - Returns: The integer value, or nil if the property doesn't exist or MPV is destroyed
-    func getIntAsync(_ name: String) async -> Int? {
-        await withCheckedContinuation { continuation in
-            mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv, !self.isDestroyed else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                var value: Int64 = 0
-                let result = mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value)
-                continuation.resume(returning: result >= 0 ? Int(value) : nil)
-            }
-        }
-    }
-
-    /// Get the demuxer cache state asynchronously (non-blocking).
-    /// Use this from MainActor code instead of getCacheState() to avoid blocking the UI.
-    /// - Returns: The cache state information, or nil if unavailable or MPV is destroyed
-    func getCacheStateAsync() async -> MPVCacheState? {
-        await withCheckedContinuation { continuation in
-            mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv, !self.isDestroyed else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                var node = mpv_node()
-                let result = mpv_get_property(mpv, "demuxer-cache-state", MPV_FORMAT_NODE, &node)
-                guard result >= 0 else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                let cacheState = self.parseCacheStateSync(node)
-                mpv_free_node_contents(&node)
-                continuation.resume(returning: cacheState)
+                defer { mpv_free(cString) }
+                continuation.resume(returning: String(cString: cString))
             }
         }
     }
@@ -1705,6 +1548,11 @@ final class MPVClient: @unchecked Sendable {
                 }
             }
 
+        case MPV_EVENT_AUDIO_RECONFIG:
+            mpvQueue.async { [weak self] in
+                self?.applyVolumeUnsafe()
+            }
+
         case MPV_EVENT_LOG_MESSAGE:
             if let data = event.data {
                 let msg = data.assumingMemoryBound(to: mpv_event_log_message.self).pointee
@@ -1865,12 +1713,6 @@ final class MPVClient: @unchecked Sendable {
     }
 
     // MARK: - Render Context
-
-    /// Get the MPV handle for render context creation.
-    /// Must be called on mpvQueue.
-    var mpvHandle: OpaquePointer? {
-        mpvQueue.sync { mpv }
-    }
 
     /// Create a render context for OpenGL rendering.
     /// - Parameter getProcAddress: Function to get OpenGL proc addresses
@@ -2271,18 +2113,28 @@ final class MPVClient: @unchecked Sendable {
 
         var flipY: Int32 = 1
         var bufferDepth = depth
+        // Without this, mpv sleeps inside mpv_render_context_render until the
+        // frame's target display time (a full frame duration, ~40ms at 25fps).
+        // That sleep happens inside CAOpenGLLayer.display() and blocks the
+        // main thread's CoreAnimation commits for its whole duration, hitching
+        // UI scrolling during playback. Vsync on the CGL context paces
+        // presentation instead.
+        var blockForTargetTime: Int32 = 0
 
         withUnsafeMutablePointer(to: &fboData) { fboPtr in
             withUnsafeMutablePointer(to: &flipY) { flipPtr in
                 withUnsafeMutablePointer(to: &bufferDepth) { depthPtr in
-                    var params: [mpv_render_param] = [
-                        mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: fboPtr),
-                        mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: flipPtr),
-                        mpv_render_param(type: MPV_RENDER_PARAM_DEPTH, data: depthPtr),
-                        mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
-                    ]
-                    _ = params.withUnsafeMutableBufferPointer { paramsPtr in
-                        mpv_render_context_render(renderContext, paramsPtr.baseAddress)
+                    withUnsafeMutablePointer(to: &blockForTargetTime) { blockPtr in
+                        var params: [mpv_render_param] = [
+                            mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: fboPtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: flipPtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_DEPTH, data: depthPtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: blockPtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
+                        ]
+                        _ = params.withUnsafeMutableBufferPointer { paramsPtr in
+                            mpv_render_context_render(renderContext, paramsPtr.baseAddress)
+                        }
                     }
                 }
             }

@@ -12,16 +12,24 @@ import AppKit
 
 struct SubscriptionsView: View {
     @Environment(\.appEnvironment) private var appEnvironment
+    @Environment(\.scenePhase) private var scenePhase
     @Namespace private var sheetTransition
     #if os(tvOS)
     @FocusState private var focusedVideoID: String?
     #endif
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     #endif
     @State private var feedCache = SubscriptionFeedCache.shared
     @State private var subscriptions: [Subscription] = []
     @State private var subscriptionsLoaded = false
+    /// The effective context the visible subscriptions were loaded for, so a
+    /// status change that does not move it does not force a reload.
+    @State private var loadedContext: DataContext?
+    /// How many times the feed has been tried again since it last stopped on a
+    /// failure that can lift, so each attempt restarts the wait for the next one.
+    @State private var feedRetryAttempt = 0
     @State private var selectedChannelID: String? = nil
     @State private var errorMessage: String?
     @State private var watchEntriesMap: [String: WatchEntry] = [:]
@@ -36,6 +44,7 @@ struct SubscriptionsView: View {
     @AppStorage("subscriptionsRowStyle") private var rowStyle: VideoRowStyle = .regular
     @AppStorage("subscriptionsGridColumns") private var gridColumns = 2
     @AppStorage("subscriptionsHideWatched") private var hideWatched = false
+    @AppStorage("subscriptionsHideShorts") private var hideShorts = false
     @AppStorage("subscriptionsChannelStripSize") private var channelStripSize: ChannelStripSize = .normal
     @AppStorage("subscriptionsShowSidebar") private var showSidebar = true
     /// Whether the last completed load produced enough channels for the sidebar,
@@ -47,6 +56,14 @@ struct SubscriptionsView: View {
     #elseif os(iOS)
     @AppStorage("subscriptionsIPadSidebarWidth") private var iPadSidebarWidth = 260.0
     @State private var iPadSidebarDragStartWidth: Double?
+    /// Whether the trailing status-bar column holds the channel rail, so the
+    /// bottom strip and the feed's bottom space for it go away.
+    @State private var channelRailFits = false
+    /// Occlusion reserved regions in global coordinates, read by a reader
+    /// that reaches into the safe area. SwiftUI reports only the regions
+    /// that intersect the querying view, and the content stops short of the
+    /// status-bar column it would place the rail in.
+    @State private var globalOcclusionFrames: [CGRect] = []
     #endif
 
     /// List style from centralized settings.
@@ -66,7 +83,7 @@ struct SubscriptionsView: View {
                 #if os(macOS)
                 Toggle("viewOptions.showSidebar", isOn: $showSidebar)
                 #elseif os(iOS)
-                if isIPadRegular {
+                if channelSidebarFits {
                     Toggle("viewOptions.showSidebar", isOn: $showSidebar)
                 }
                 #elseif os(tvOS)
@@ -115,8 +132,13 @@ struct SubscriptionsView: View {
                     Text("common.on").tag(true)
                     Text("common.off").tag(false)
                 }
+                PlatformMenuPicker(String(localized: "viewOptions.hideShorts"), selection: $hideShorts) {
+                    Text("common.on").tag(true)
+                    Text("common.off").tag(false)
+                }
                 #else
                 Toggle("viewOptions.hideWatched", isOn: $hideWatched)
+                Toggle("viewOptions.hideShorts", isOn: $hideShorts)
                 #endif
 
                 #if os(iOS)
@@ -125,7 +147,7 @@ struct SubscriptionsView: View {
                         Text(size.displayName).tag(size)
                     }
                 }
-                .disabled(isIPadRegular && showSidebar)
+                .disabled(channelSidebarFits && showSidebar)
                 #endif
             }
 
@@ -162,11 +184,53 @@ struct SubscriptionsView: View {
     }
     #endif
 
+    /// The feed error worth showing, if any — the banner takes over only for
+    /// the errors it is already the answer to.
+    private var displayedFeedError: FeedLoadState.FeedLoadError? {
+        feedCache.feedLoadState.displayedError(contextBannerVisible: contextUnavailability != nil)
+    }
+
+    /// Whether the channel filter is a rail in the trailing column rather than
+    /// a bottom strip, so the feed needs no bottom space for it.
+    private var usesChannelRail: Bool {
+        #if os(iOS)
+        channelRailFits
+        #else
+        false
+        #endif
+    }
+
     private var isShowingFullScreenError: Bool {
-        if case .error = feedCache.feedLoadState, feedCache.videos.isEmpty {
-            return true
-        }
-        return false
+        displayedFeedError != nil && feedCache.videos.isEmpty
+    }
+
+    /// Whether the feed stopped on a failure the banner is already the answer
+    /// to, and so has nothing of its own to show.
+    ///
+    /// Without this the view falls back through to the spinner it started on
+    /// and stays there for as long as the account is unusable: the request that
+    /// would replace it is the one that cannot be made.
+    private var feedSettledOnAnsweredError: Bool {
+        guard case .error = feedCache.feedLoadState else { return false }
+        return displayedFeedError == nil
+    }
+
+    /// How long a feed that failed on the network waits before trying again.
+    private static let feedRetryInterval: TimeInterval = 60
+
+    /// The failure the feed is currently sitting on, if it is one that trying
+    /// again could answer differently.
+    ///
+    /// A network error always is. So is the Yattee Server the local feed asks
+    /// for while it is only standing in for an account whose server could not
+    /// be reached — that request is not the real answer, and the one that is
+    /// comes back on a status expiry nothing here is watching. An account that
+    /// genuinely has no Yattee Server never arms this: the unavailability it
+    /// gates on is `nil` for a context the user selected themselves.
+    private var feedRetryToken: Int? {
+        guard feedCache.feedLoadState.warrantsPeriodicRetry(unavailability: contextUnavailability)
+        else { return nil }
+        return feedRetryAttempt
     }
 
     private var dataManager: DataManager? { appEnvironment?.dataManager }
@@ -188,16 +252,20 @@ struct SubscriptionsView: View {
         }
         return instances
             .filter { $0.type == .yatteeServer }
-            .map { "\($0.id):\($0.isEnabled):\($0.apiKey?.isEmpty == false)" }
+            .map { "\($0.id):\($0.isEnabled)" }
             .joined(separator: "|")
     }
 
-    /// Videos filtered by selected channel and watch status.
+    /// Videos filtered by selected channel, watch status and Shorts.
     private var filteredVideos: [Video] {
         var videos = feedCache.videos
 
         if let channelID = selectedChannelID {
             videos = videos.filter { $0.author.id == channelID }
+        }
+
+        if hideShorts {
+            videos = videos.filter { !$0.isKnownShort }
         }
 
         if hideWatched {
@@ -246,19 +314,21 @@ struct SubscriptionsView: View {
             .background(Color.black.opacity(0.3))
             #endif
 
-        case .error(let error):
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle")
-                Text(errorMessage(for: error))
-                    .font(.caption)
+        case .error:
+            if let error = displayedFeedError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text(errorMessage(for: error))
+                        .font(.caption)
+                }
+                .foregroundStyle(.red)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                #if os(tvOS)
+                .background(Color.black.opacity(0.3))
+                #endif
             }
-            .foregroundStyle(.red)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            #if os(tvOS)
-            .background(Color.black.opacity(0.3))
-            #endif
 
         case .loadingMore:
             HStack(spacing: 8) {
@@ -321,6 +391,15 @@ struct SubscriptionsView: View {
         return progress > 0 && progress < 1 ? progress : nil
     }
 
+    /// Why the selected account is not the one answering, when it is not.
+    ///
+    /// Only for an account context: local data is never unavailable, and the
+    /// fallback the banner explains is local data itself.
+    private var contextUnavailability: DataContextUnavailability? {
+        guard appEnvironment?.accountsManager.currentContext.isLocal == false else { return nil }
+        return appEnvironment?.dataContextValidator.unavailability
+    }
+
     /// View options button lives on the leading edge on macOS, trailing elsewhere.
     private var viewOptionsPlacement: ToolbarItemPlacement {
         #if os(macOS)
@@ -336,14 +415,14 @@ struct SubscriptionsView: View {
                 ZStack {
                     #if os(tvOS)
                     HStack(alignment: .top, spacing: 24) {
-                        if showSidebar && subscriptionsLoaded && subscriptions.count > 1 {
+                        if showSidebar && subscriptionsLoaded && !subscriptions.isEmpty {
                             tvOSChannelsSidebar
                                 .frame(width: max(geometry.size.width * 0.28, 360), alignment: .leading)
                                 .focusSection()
                         }
 
                         VStack(alignment: .leading, spacing: 16) {
-                            if !showSidebar || subscriptions.count <= 1 {
+                            if !showSidebar || subscriptions.isEmpty {
                                 tvOSViewOptionsButton
                             }
 
@@ -386,7 +465,7 @@ struct SubscriptionsView: View {
                         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
                     }
                     #else
-                    if isIPadRegular && showSidebar && subscriptionsLoaded && subscriptions.count > 1 {
+                    if channelSidebarFits && showSidebar && subscriptionsLoaded && subscriptions.count > 1 {
                         HStack(spacing: 0) {
                             iOSChannelsSidebar
                                 .frame(width: clampedIPadSidebarWidth)
@@ -420,12 +499,19 @@ struct SubscriptionsView: View {
                     VStack {
                         Spacer()
 
-                        if subscriptionsLoaded && subscriptions.count > 1 && channelStripSize != .disabled && !isShowingFullScreenError && !(isIPadRegular && showSidebar) {
+                        if showsChannelStrip && !channelRailFits {
                             bottomFloatingFilterStrip
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                     }
                     #endif
+                }
+                // Above the feed rather than inside it: the feed is local data
+                // while this is showing, and nothing else on screen says so.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let unavailability = contextUnavailability {
+                        DataContextUnavailableBanner(reason: unavailability)
+                    }
                 }
                 #if !os(tvOS)
                 .navigationTitle(String(localized: "tabs.subscriptions"))
@@ -435,6 +521,17 @@ struct SubscriptionsView: View {
                 .toolbarTitleDisplayMode(.inlineLarge)
                 #endif
                 .toolbar {
+                    // No switcher wherever a sidebar shows one: the macOS
+                    // sidebar row and the iPad sidebar's bottom bar are the
+                    // persistent switcher surfaces there, so the toolbar menu
+                    // is compact-width-only.
+                    #if !os(macOS)
+                    if DataContextSwitcherVisibility.showsToolbarPickers(in: appEnvironment, horizontalSizeClass: horizontalSizeClass) {
+                        ToolbarItem(placement: viewOptionsPlacement) {
+                            DataContextSwitcherMenu()
+                        }
+                    }
+                    #endif
                     ToolbarItem(placement: viewOptionsPlacement) {
                         Button {
                             showViewOptions = true
@@ -484,10 +581,21 @@ struct SubscriptionsView: View {
                         .liquidGlassSheetContent(sourceID: "subscriptionsViewOptions", in: sheetTransition)
                     }
                     #endif
+                    .dismissesOnExternalNavigation($showViewOptions)
+                    #if os(macOS)
+                    .dismissesOnExternalNavigation($showSubscriptionsData)
+                    #endif
                     .onAppear {
                         // Synchronous load for local accounts so the sidebar is
                         // present in the first layout pass (avoids layout jump).
                         loadSubscriptions()
+                        // Coming back to a feed that failed while it was away is
+                        // the most likely moment for it to work again.
+                        retryFeedIfNeeded()
+                    }
+                    .onChange(of: scenePhase) { _, phase in
+                        guard phase == .active else { return }
+                        retryFeedIfNeeded()
                     }
                     .task {
                         await loadSubscriptionsAsync()
@@ -502,16 +610,36 @@ struct SubscriptionsView: View {
                     .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
                         loadWatchEntries()
                     }
-                    .onChange(of: appEnvironment?.settingsManager.subscriptionAccount) { _, _ in
-                        // Clear cache and refresh when subscription account changes
-                        feedCache.handleAccountChange()
-                        subscriptions = []
-                        subscriptionsLoaded = false
-                        Task {
-                            guard let appEnvironment else { return }
-                            await loadSubscriptionsAsync()
-                            await feedCache.refresh(using: appEnvironment)
-                        }
+                    // The data context, not the legacy setting: two logins on
+                    // the same instance map onto the same legacy value, so
+                    // switching between them would change nothing here and this
+                    // view would keep showing the first account's subscriptions
+                    // while writes went to the second.
+                    //
+                    // Status changes count too, through the *effective* context:
+                    // a credential arriving or being rejected moves reads
+                    // between the account and local without the stored context
+                    // moving at all.
+                    .onReceive(NotificationCenter.default.publisher(for: .dataContextDidChange)) { _ in
+                        reloadForContextChange()
+                    }
+                    // Instances count for the same reason: switching one off
+                    // moves reads to local without touching the stored context
+                    // or any account status. And a status that lifts without
+                    // moving reads at all still deserves the attempt the
+                    // failure before it never got.
+                    .onReceive(NotificationCenter.default.publisher(for: .accountStatusesDidChange)) { _ in
+                        guard !reloadIfEffectiveContextMoved() else { return }
+                        retryFeedIfNeeded()
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: .instancesDidChange)) { _ in
+                        reloadIfEffectiveContextMoved()
+                    }
+                    // Signing in again keeps the same account and context, so
+                    // nothing above would fire — but the data on screen may now
+                    // belong to a different person on that server.
+                    .onReceive(NotificationCenter.default.publisher(for: .accountCredentialDidChange)) { _ in
+                        reloadForContextChange()
                     }
                 .task(id: instanceConfigurationID) {
                     LoggingService.shared.debug("SubscriptionsView task triggered, instanceConfigurationID: \(instanceConfigurationID)", category: .general)
@@ -539,6 +667,22 @@ struct SubscriptionsView: View {
                         LoggingService.shared.debug("Using cached feed, no refresh needed", category: .general)
                     }
                 }
+                // A server that went away comes back without announcing it, and
+                // a feed that failed on the way to it is not watching anything
+                // that would notice — so it asks again on its own, for as long
+                // as the failure is on screen.
+                //
+                // One attempt in flight at a time, and none at all outside the
+                // states above: the id going nil, the fence dropping the state
+                // back to idle, and the view disappearing all cancel this task,
+                // and the next attempt is only armed by the last one finishing.
+                .task(id: feedRetryToken) {
+                    guard feedRetryToken != nil else { return }
+                    try? await Task.sleep(for: .seconds(Self.feedRetryInterval))
+                    guard !Task.isCancelled else { return }
+                    await loadFeed(forceRefresh: true)
+                    feedRetryAttempt += 1
+                }
                 .onChange(of: selectedChannelID) { _, _ in
                     withAnimation {
                         proxy.scrollTo("top", anchor: .top)
@@ -558,6 +702,36 @@ struct SubscriptionsView: View {
             .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                 viewWidth = newWidth
             }
+            #if os(iOS)
+            // Outside the ZStack so the rail is placed in the reader's own
+            // coordinate space, which the column geometry is measured in.
+            //
+            // The placement is computed in the same pass as the geometry, not
+            // kept in state: the reader's origin moves while the large title
+            // collapses on scroll, and a placement applied a pass late would
+            // ride along with it for a frame before snapping back.
+            .overlay(alignment: .topLeading) {
+                if showsChannelStrip, channelRailFits, let placement = channelRailPlacement(in: geometry) {
+                    channelRailView(placement)
+                        .offset(x: placement.x, y: placement.top)
+                        .transition(.opacity)
+                }
+            }
+            // Recomputed on every geometry pass, which includes the reserved
+            // regions changing when the Dynamic Island grows or shrinks.
+            .onChange(of: channelRailPlacement(in: geometry) != nil, initial: true) { _, fits in
+                channelRailFits = fits
+            }
+            .background {
+                GeometryReader { fullBleed in
+                    Color.clear
+                        .onChange(of: occlusionFrames(in: fullBleed), initial: true) { _, frames in
+                            globalOcclusionFrames = frames
+                        }
+                }
+                .ignoresSafeArea()
+            }
+            #endif
         }
     }
 
@@ -578,7 +752,7 @@ struct SubscriptionsView: View {
         } footer: {
             #if os(iOS)
             // Bottom spacer for channel strip overlay (outside the card)
-            if channelStripSize != .disabled && subscriptions.count > 1 && !isShowingFullScreenError {
+            if channelStripSize != .disabled && subscriptions.count > 1 && !isShowingFullScreenError && !usesChannelRail {
                 Color.clear.frame(height: channelStripSize.totalHeight)
             }
             #else
@@ -601,7 +775,7 @@ struct SubscriptionsView: View {
     /// Feed content rows or empty/loading states.
     @ViewBuilder
     private var feedContentRows: some View {
-        if case .error(let feedError) = feedCache.feedLoadState, feedCache.videos.isEmpty {
+        if let feedError = displayedFeedError, feedCache.videos.isEmpty {
             // Show specific error states
             switch feedError {
             case .yatteeServerRequired:
@@ -664,6 +838,8 @@ struct SubscriptionsView: View {
                         }
                 }
             }
+        } else if feedSettledOnAnsweredError {
+            feedUnavailableView
         } else if feedCache.hasLoadedOnce {
             gridEmptyView
         } else {
@@ -691,7 +867,7 @@ struct SubscriptionsView: View {
                 #endif
 
                 // Content
-                if case .error(let feedError) = feedCache.feedLoadState, feedCache.videos.isEmpty {
+                if let feedError = displayedFeedError, feedCache.videos.isEmpty {
                     // Show specific error states
                     switch feedError {
                     case .yatteeServerRequired:
@@ -707,6 +883,8 @@ struct SubscriptionsView: View {
                     gridErrorView(error)
                 } else if !feedCache.videos.isEmpty {
                     gridFeedContent
+                } else if feedSettledOnAnsweredError {
+                    feedUnavailableView
                 } else if feedCache.hasLoadedOnce {
                     gridEmptyView
                 } else {
@@ -714,7 +892,7 @@ struct SubscriptionsView: View {
                 }
 
                 // Bottom spacer for channel strip overlay
-                if channelStripSize != .disabled && subscriptions.count > 1 && !isShowingFullScreenError {
+                if channelStripSize != .disabled && subscriptions.count > 1 && !isShowingFullScreenError && !usesChannelRail {
                     Color.clear.frame(height: channelStripSize.totalHeight)
                 }
             }
@@ -759,45 +937,94 @@ struct SubscriptionsView: View {
     /// The HStack containing channel filter chips (extracted to avoid duplication).
     private var channelChipsHStack: some View {
         HStack(spacing: channelStripSize.chipSpacing) {
-            ForEach(sortedSubscriptions, id: \.channelID) { subscription in
-                ChannelFilterChip(
-                    channelID: subscription.channelID,
-                    name: subscription.name,
-                    avatarURL: subscription.avatarURL,
-                    serverURL: yatteeServerURL,
-                    isSelected: selectedChannelID == subscription.channelID,
-                    avatarSize: channelStripSize.avatarSize,
-                    onTap: {
-                        if selectedChannelID == subscription.channelID {
-                            selectedChannelID = nil
-                        } else {
-                            selectedChannelID = subscription.channelID
-                        }
-                    },
-                    onGoToChannel: {
-                        appEnvironment?.navigationCoordinator.navigate(
-                            to: .channel(subscription.channelID, subscription.contentSource)
-                        )
-                    },
-                    onUnsubscribe: {
-                        unsubscribeChannel(subscription.channelID)
-                    },
-                    authHeader: yatteeServerAuthHeader
-                )
-            }
+            channelChips(avatarSize: channelStripSize.avatarSize)
         }
     }
+
+    /// One filter chip per channel, laid out by the caller.
+    private func channelChips(avatarSize: CGFloat) -> some View {
+        ForEach(sortedSubscriptions, id: \.channelID) { subscription in
+            ChannelFilterChip(
+                channelID: subscription.channelID,
+                name: subscription.name,
+                avatarURL: subscription.avatarURL,
+                serverURL: yatteeServerURL,
+                isSelected: selectedChannelID == subscription.channelID,
+                avatarSize: avatarSize,
+                onTap: {
+                    if selectedChannelID == subscription.channelID {
+                        selectedChannelID = nil
+                    } else {
+                        selectedChannelID = subscription.channelID
+                    }
+                },
+                onGoToChannel: {
+                    appEnvironment?.navigationCoordinator.navigate(
+                        to: .channel(subscription.channelID, subscription.contentSource)
+                    )
+                },
+                onUnsubscribe: {
+                    unsubscribeChannel(subscription.channelID)
+                },
+                authHeader: yatteeServerAuthHeader
+            )
+        }
+    }
+
+    #if os(iOS)
+    /// The channel filter as a vertical rail in the trailing status-bar column
+    /// (iPhone Duo inner screen), stacked from the bottom so the system's status
+    /// items above never reach a short list, and scrolling when it outgrows the
+    /// column.
+    private func channelRailView(_ placement: ChannelRailPlacement) -> some View {
+        // The large strip size is wider than the column. It gives up padding
+        // before avatar size, so it still reads as larger than normal.
+        let available = placement.width - Self.channelRailSideInset * 2
+        let avatarSize = min(channelStripSize.avatarSize, available - 2 * Self.channelRailMinPadding)
+        let padding = max(Self.channelRailMinPadding, min(channelStripSize.verticalPadding, (available - avatarSize) / 2))
+        let chips = VStack(spacing: channelStripSize.chipSpacing) {
+            channelChips(avatarSize: avatarSize)
+        }
+        .padding(padding)
+
+        return ViewThatFits(in: .vertical) {
+            chips
+                .clipShape(Capsule())
+                .glassBackground(.regular, in: .capsule, fallback: .regularMaterial)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                chips
+            }
+            .clipShape(Capsule())
+            .glassBackground(.regular, in: .capsule, fallback: .regularMaterial)
+        }
+        .frame(width: placement.width, height: placement.height, alignment: .bottom)
+        .animation(.smooth, value: placement.height)
+    }
+    #endif
 
     // MARK: - tvOS Channels Sidebar
 
     #if os(tvOS)
     private var tvOSViewOptionsButton: some View {
-        Button {
-            showViewOptions = true
-        } label: {
-            Label(String(localized: "viewOptions.title"), systemImage: "slider.horizontal.3")
+        HStack(spacing: 16) {
+            // The sidebar is too narrow for both buttons' full titles, and
+            // tvOS wraps them into tall two-line lozenges before truncating.
+            // The account name is the label worth keeping whole, so this
+            // button keeps only its icon and the name gets the width.
+            Button {
+                showViewOptions = true
+            } label: {
+                Label(String(localized: "viewOptions.title"), systemImage: "slider.horizontal.3")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel(Text(String(localized: "viewOptions.title")))
+
+            if DataContextSwitcherVisibility.showsPickers(in: appEnvironment) {
+                DataContextSwitcherButton()
+            }
         }
-        .buttonStyle(.bordered)
     }
 
     private var tvOSChannelsSidebar: some View {
@@ -999,9 +1226,9 @@ struct SubscriptionsView: View {
         #if os(macOS)
         return showSidebar && subscriptionsLoaded && subscriptions.count > 1
         #elseif os(iOS)
-        return isIPadRegular && showSidebar && subscriptionsLoaded && subscriptions.count > 1
+        return channelSidebarFits && showSidebar && subscriptionsLoaded && subscriptions.count > 1
         #elseif os(tvOS)
-        return showSidebar && subscriptionsLoaded && subscriptions.count > 1
+        return showSidebar && subscriptionsLoaded && !subscriptions.isEmpty
         #else
         return false
         #endif
@@ -1011,8 +1238,91 @@ struct SubscriptionsView: View {
     private static let iPadSidebarMinWidth = 220.0
     private static let iPadSidebarMaxWidth = 420.0
 
+    /// Room for the channel sidebar next to the feed: wherever the app itself
+    /// uses the sidebar layout (iPad, iPhone Duo inner screen).
     private var isIPadRegular: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
+        NavigationLayout.usesSidebar(horizontalSizeClass: horizontalSizeClass, verticalSizeClass: verticalSizeClass)
+    }
+
+    /// Feed width the channel sidebar must leave over, or the cards next to it
+    /// are unreadable: on the iPhone Duo inner screen with the app sidebar
+    /// open, the content column is ~490pt, which the sidebar would take half of.
+    /// The floating channel strip takes over below this, as on iPhone.
+    private static let iPadSidebarMinFeedWidth = 320.0
+    private static let iPadSidebarHandleWidth = 14.0
+
+    /// Whether the content column is wide enough for the channel sidebar next
+    /// to the feed. Gated on the sidebar's minimum, not its current width, so
+    /// widening it by drag can never make it disappear. Until the first
+    /// measurement the size class alone decides, so iPad does not flash the
+    /// strip on the first frame.
+    private var channelSidebarFits: Bool {
+        guard isIPadRegular else { return false }
+        guard viewWidth > 0 else { return true }
+        return viewWidth >= Self.iPadSidebarMinWidth + Self.iPadSidebarHandleWidth + Self.iPadSidebarMinFeedWidth
+    }
+
+    /// Whether the channel filter shows at all, as a bottom strip or a rail:
+    /// enough channels to filter and no channel sidebar doing the job.
+    private var showsChannelStrip: Bool {
+        subscriptionsLoaded && subscriptions.count > 1 && channelStripSize != .disabled
+            && !isShowingFullScreenError && !(channelSidebarFits && showSidebar)
+    }
+
+    /// The rail's frame in the content's coordinate space: the trailing
+    /// safe-area column, below whatever the system draws there.
+    struct ChannelRailPlacement: Equatable {
+        var x: CGFloat
+        var top: CGFloat
+        var width: CGFloat
+        var height: CGFloat
+    }
+
+    /// Narrower than this the column is a notch or rounded-corner inset, not
+    /// room for avatars.
+    private static let channelRailMinColumnWidth = 60.0
+    /// Below this the rail would hold only two or three avatars, which the
+    /// bottom strip shows just as well.
+    private static let channelRailMinHeight = 240.0
+    private static let channelRailEdgeSpacing = 8.0
+    private static let channelRailSideInset = 4.0
+    private static let channelRailMinPadding = 8.0
+
+    /// Where the channel rail fits, decided by space rather than device: a
+    /// trailing safe-area column wide enough for avatars (the iPhone Duo's
+    /// vertical status bar) with enough height left below the system's status
+    /// items and Dynamic Island. Those are read as occlusion reserved regions,
+    /// which grow and shrink with the island while the safe area stays put.
+    ///
+    /// The tab layout is ruled out because its tab bar takes the same column
+    /// (Duo exterior screen), and the tab bar is not a reserved region.
+    private func channelRailPlacement(in geometry: GeometryProxy) -> ChannelRailPlacement? {
+        guard #available(iOS 27.1, *) else { return nil }
+        guard isIPadRegular else { return nil }
+
+        let width = geometry.safeAreaInsets.trailing
+        guard width >= Self.channelRailMinColumnWidth else { return nil }
+
+        let columnMinX = geometry.size.width
+        let origin = geometry.frame(in: .global).origin
+        let occludedBottom = globalOcclusionFrames
+            .map { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
+            .filter { $0.maxX > columnMinX }
+            .map(\.maxY)
+            .max() ?? -geometry.safeAreaInsets.top
+        let top = occludedBottom + Self.channelRailEdgeSpacing
+        let bottom = geometry.size.height - Self.channelRailEdgeSpacing
+        guard bottom - top >= Self.channelRailMinHeight else { return nil }
+
+        return ChannelRailPlacement(x: columnMinX, top: top, width: width, height: bottom - top)
+    }
+
+    /// Active occlusion regions seen by `geometry`, in global coordinates.
+    private func occlusionFrames(in geometry: GeometryProxy) -> [CGRect] {
+        guard #available(iOS 27.1, *) else { return [] }
+        let origin = geometry.frame(in: .global).origin
+        return geometry.reservedRegions(kind: .occlusion)
+            .map { $0.frame.offsetBy(dx: origin.x, dy: origin.y) }
     }
 
     private var clampedIPadSidebarWidth: CGFloat {
@@ -1096,7 +1406,7 @@ struct SubscriptionsView: View {
             Rectangle()
                 .fill(.separator.opacity(0.7))
                 .frame(width: 1)
-            .frame(width: 14)
+            .frame(width: Self.iPadSidebarHandleWidth)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
             .highPriorityGesture(iPadSidebarResizeGesture)
@@ -1283,6 +1593,21 @@ struct SubscriptionsView: View {
         )
     }
 
+    /// Terminal state for a feed that stopped on a failure the banner explains.
+    private var feedUnavailableView: some View {
+        ContentUnavailableView {
+            Label(String(localized: "subscriptions.feedUnavailable.title"), systemImage: "wifi.exclamationmark")
+        } description: {
+            Text(String(localized: "subscriptions.feedUnavailable.description"))
+        } actions: {
+            Button(String(localized: "common.retry")) {
+                Task { await loadFeed(forceRefresh: true) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 40)
+    }
+
     /// Empty state shown when Invidious account is not authenticated.
     private var notAuthenticatedView: some View {
         feedErrorView(
@@ -1329,7 +1654,7 @@ struct SubscriptionsView: View {
     private func loadSubscriptions() {
         // For local account, load from DataManager
         // For Invidious, subscriptions will be loaded async in loadSubscriptionsAsync
-        if appEnvironment?.settingsManager.subscriptionAccount.type == .local {
+        if appEnvironment?.accountsManager.currentContext.isLocal == true {
             subscriptions = dataManager?.subscriptions() ?? []
             subscriptionsLoaded = true
             sidebarExpected = subscriptions.count > 1
@@ -1343,11 +1668,63 @@ struct SubscriptionsView: View {
 
     /// Loads subscriptions asynchronously from the current provider.
     /// For Invidious, this fetches from the API and creates temporary Subscription objects for UI.
+    @discardableResult
+    private func reloadIfEffectiveContextMoved() -> Bool {
+        guard appEnvironment?.dataContextValidator.effectiveContext != loadedContext else { return false }
+        reloadForEffectiveContextChange()
+        return true
+    }
+
+    /// Drops what is on screen and reloads it for whatever context is current.
+    private func reloadForContextChange() {
+        feedCache.handleAccountChange()
+        subscriptions = []
+        subscriptionsLoaded = false
+        reload()
+    }
+
+    /// Reloads for a move the user did not make — a status lifting or falling,
+    /// an instance switched off — where the selection itself is unchanged.
+    ///
+    /// Keeps what is on screen: the cached feed and the channel list still
+    /// belong to the account that was selected before and still is, and they
+    /// are the fallback the banner is telling the user they are looking at.
+    private func reloadForEffectiveContextChange() {
+        feedCache.handleEffectiveContextChange()
+        reload()
+    }
+
+    private func reload() {
+        loadedContext = appEnvironment?.dataContextValidator.effectiveContext
+
+        Task {
+            guard let appEnvironment else { return }
+            await loadSubscriptionsAsync()
+            await feedCache.refresh(using: appEnvironment)
+        }
+    }
+
+    /// Tries the feed again when something happened that may have changed the
+    /// answer, and it is sitting on a failure.
+    ///
+    /// The account statuses lift on their own, but a feed that already failed
+    /// has nothing watching for that — it waited for a Retry nobody should have
+    /// to press to find out the server came back.
+    private func retryFeedIfNeeded() {
+        guard case .error = feedCache.feedLoadState, !feedCache.isLoading else { return }
+        Task { await loadFeed(forceRefresh: true) }
+    }
+
     private func loadSubscriptionsAsync() async {
         guard let subscriptionService, let appEnvironment else { return }
 
+        // Recorded on every load, not only on a context change: the first load
+        // of a session has to establish what is on screen, or the first status
+        // change would look like a move and reload for nothing.
+        loadedContext = appEnvironment.dataContextValidator.effectiveContext
+
         // For local account, just load from DataManager (fast)
-        if appEnvironment.settingsManager.subscriptionAccount.type == .local {
+        if appEnvironment.accountsManager.currentContext.isLocal {
             subscriptions = dataManager?.subscriptions() ?? []
             subscriptionsLoaded = true
             sidebarExpected = subscriptions.count > 1

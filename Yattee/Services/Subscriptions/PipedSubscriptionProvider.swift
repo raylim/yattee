@@ -15,12 +15,26 @@ import Foundation
 final class PipedSubscriptionProvider: SubscriptionProvider {
     // MARK: - Properties
 
-    let accountType: SubscriptionAccountType = .piped
+    /// The account this provider is bound to. One provider per account, so two
+    /// logins on the same instance never share a subscription cache.
+    let account: Account
 
     private let pipedAPI: PipedAPI
     private let credentialsManager: PipedCredentialsManager
-    private let instancesManager: InstancesManager
-    private let settingsManager: SettingsManager
+    private let accountsManager: AccountsManager
+
+    /// Records the outcome of a server call against the account. The
+    /// classification lives in one place so the feed cache, which talks to the
+    /// same servers without going through a provider, reaches the same verdict.
+    private func recordOutcome(_ error: Error?, credential: String) {
+        // Only for the secret the request actually used. Signing in again — or
+        // a switch of Apple account — replaces it under the same key while a
+        // request is still out, and a late 401 would otherwise reject the
+        // replacement, or a late success clear a rejection it never earned.
+        guard credentialsManager.credential(for: account) == credential else { return }
+
+        accountsManager.recordServerOutcome(error, for: account)
+    }
 
     /// In-memory cache of subscribed channel IDs for fast lookup.
     private var cachedChannelIDs: Set<String> = []
@@ -35,15 +49,16 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
     // MARK: - Initialization
 
     init(
+        account: Account,
         pipedAPI: PipedAPI,
         credentialsManager: PipedCredentialsManager,
-        instancesManager: InstancesManager,
+        accountsManager: AccountsManager,
         settingsManager: SettingsManager
     ) {
+        self.account = account
         self.pipedAPI = pipedAPI
         self.credentialsManager = credentialsManager
-        self.instancesManager = instancesManager
-        self.settingsManager = settingsManager
+        self.accountsManager = accountsManager
     }
 
     // MARK: - SubscriptionProvider
@@ -53,7 +68,9 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
         let (instance, authToken) = try await getAuthenticatedInstance()
 
         // Fetch subscriptions from Piped
-        let subscriptions = try await pipedAPI.subscriptions(instance: instance, authToken: authToken)
+        let subscriptions = try await tracking(credential: authToken) {
+            try await pipedAPI.subscriptions(instance: instance, authToken: authToken)
+        }
 
         // Update in-memory cache
         cachedChannelIDs = Set(subscriptions.map(\.channelId))
@@ -70,8 +87,12 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
         invalidateCacheIfAccountChanged()
         let (instance, authToken) = try await getAuthenticatedInstance()
 
-        // Subscribe on Piped server
-        try await pipedAPI.subscribe(channelID: channel.id.channelID, instance: instance, authToken: authToken)
+        // Subscribe on Piped server. Tracked like every other authenticated
+        // call: a rejected credential noticed here must mark the account, or it
+        // keeps reporting itself as signed in.
+        try await tracking(credential: authToken) {
+            try await pipedAPI.subscribe(channelID: channel.id.channelID, instance: instance, authToken: authToken)
+        }
 
         // Update in-memory cache only
         cachedChannelIDs.insert(channel.id.channelID)
@@ -88,7 +109,9 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
         let (instance, authToken) = try await getAuthenticatedInstance()
 
         // Unsubscribe on Piped server
-        try await pipedAPI.unsubscribe(channelID: channelID, instance: instance, authToken: authToken)
+        try await tracking(credential: authToken) {
+            try await pipedAPI.unsubscribe(channelID: channelID, instance: instance, authToken: authToken)
+        }
 
         // Update in-memory cache only
         cachedChannelIDs.remove(channelID)
@@ -122,6 +145,10 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
         return cachePopulated ? cachedChannels.count : nil
     }
 
+    var cachedSubscriptions: [Channel]? {
+        cachePopulated ? cachedChannels : nil
+    }
+
     // MARK: - Private Helpers
 
     private func invalidateCacheIfAccountChanged() {
@@ -134,25 +161,27 @@ final class PipedSubscriptionProvider: SubscriptionProvider {
     }
 
     /// Gets the authenticated Piped instance and auth token from account settings.
-    private func getAuthenticatedInstance() async throws -> (Instance, String) {
-        // Get the instance ID from subscription account settings
-        let account = settingsManager.subscriptionAccount
-
-        let instance: Instance?
-        if let instanceID = account.instanceID {
-            // Use the specific instance from account settings
-            instance = instancesManager.instances.first { $0.id == instanceID && $0.isEnabled }
-        } else {
-            // Fallback to first enabled Piped instance
-            instance = instancesManager.instances.first { $0.type == .piped && $0.isEnabled }
+    /// Runs a server call and records what it implies about the credential.
+    private func tracking<T>(credential: String, _ operation: () async throws -> T) async rethrows -> T {
+        do {
+            let value = try await operation()
+            recordOutcome(nil, credential: credential)
+            return value
+        } catch {
+            recordOutcome(error, credential: credential)
+            throw error
         }
+    }
 
-        guard let instance else {
+    private func getAuthenticatedInstance() async throws -> (Instance, String) {
+        // The account names its instance directly - no falling back to
+        // "some enabled Piped instance", which could silently send one
+        // account's request to a server it has no credential for.
+        guard let instance = accountsManager.instance(for: account), instance.isEnabled else {
             throw SubscriptionProviderError.instanceNotConfigured
         }
 
-        // Get auth token
-        guard let authToken = credentialsManager.credential(for: instance) else {
+        guard let authToken = credentialsManager.credential(for: account) else {
             throw SubscriptionProviderError.notAuthenticated
         }
 

@@ -28,9 +28,19 @@ struct ChannelView: View {
     @State private var isLoading = true
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
-    @State private var subscription: Subscription?
     @State private var isSubscribed = false
+    /// Which subscription lookup the button state belongs to. A channel change
+    /// or a change of who is being read as bumps it, so a reply from the
+    /// previous one is dropped instead of answering for the channel on screen.
+    @State private var subscriptionGeneration = 0
     @State private var showingUnsubscribeConfirmation = false
+    /// What the destination rows know, kept here rather than inside the menu:
+    /// nothing in a platform menu's content is ever given a lifecycle to load
+    /// from.
+    @State private var destinationMembership = SubscriptionDestinationMembershipLoader()
+    #if os(tvOS)
+    @State private var showingSubscriptionDestinations = false
+    #endif
     @State private var scrollOffset: CGFloat = 0
     @State private var scrollToTop: Bool = false
     @State private var cachedHeader: CachedChannelData?
@@ -49,6 +59,9 @@ struct ChannelView: View {
     // UI state for view options
     @State private var showViewOptions = false
     @State private var viewWidth: CGFloat = 0
+    /// Horizontal safe area insets of the outer container (e.g. the iPhone Duo
+    /// exterior display's vertical status bar). The banner extends under them.
+    @State private var horizontalSafeAreaInsets: (leading: CGFloat, trailing: CGFloat) = (0, 0)
     @State private var watchEntriesMap: [String: WatchEntry] = [:]
 
     // Videos tab state
@@ -176,15 +189,36 @@ struct ChannelView: View {
                     loadingContent(cachedHeader)
                 } else if isLoading {
                     ProgressView()
+                        #if os(tvOS)
+                        // As a sidebar channel this is a tab root that cannot
+                        // be popped, so Cancel lands on the error and its Retry.
+                        .tvStalledLoadCancel {
+                            isLoading = false
+                            errorMessage = String(localized: "common.loadingStopped")
+                        }
+                        #endif
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let error = errorMessage {
                     errorView(error)
+                } else {
+                    // The channel request failed while the videos one did not,
+                    // with no cached header to build the channel from.
+                    errorView(String(localized: "channelView.loadError"))
                 }
             }
         }
         .background(showInsetBackground ? viewBackgroundColor : .clear)
         .task {
             await loadChannel()
+        }
+        // Asked for here, where the answers arrive before the menu is built:
+        // the rows themselves live inside a platform menu, which runs no
+        // lifecycle of its own, and a mark that is not known by the time the
+        // menu opens is a mark the user never sees.
+        .task(id: channelToSubscribe?.id) {
+            guard let channelToSubscribe,
+                  SubscriptionDestinations.areOffered(in: appEnvironment) else { return }
+            await destinationMembership.load(for: channelToSubscribe, in: appEnvironment)
         }
         .onAppear {
             // Update Handoff activity for this specific channel
@@ -193,6 +227,15 @@ struct ChannelView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
             loadWatchEntries()
+        }
+        // Whose subscriptions the button speaks for just changed — by selection,
+        // or by the credential behind the selected account being replaced — so
+        // it has to be asked again rather than left showing the last answer.
+        .onReceive(NotificationCenter.default.publisher(for: .dataContextDidChange)) { _ in
+            refreshSubscription()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .accountCredentialDidChange)) { _ in
+            refreshSubscription()
         }
     }
 
@@ -274,11 +317,6 @@ struct ChannelView: View {
     /// Current avatar size interpolated between full and collapsed
     private var currentAvatarSize: CGFloat {
         avatarSize - (avatarSize - collapsedAvatarSize) * collapseProgress
-    }
-
-    /// Opacity for expanded content (fades out as we scroll)
-    private var expandedContentOpacity: CGFloat {
-        1 - min(collapseProgress * 2, 1)
     }
 
     /// Opacity for collapsed title (fades in as we scroll)
@@ -370,6 +408,9 @@ struct ChannelView: View {
             }
             .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                 viewWidth = newWidth
+            }
+            .onChange(of: geometry.safeAreaInsets, initial: true) { _, insets in
+                horizontalSafeAreaInsets = (insets.leading, insets.trailing)
             }
         }
         .background(viewBackgroundColor)
@@ -537,6 +578,9 @@ struct ChannelView: View {
             .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                 viewWidth = newWidth
             }
+            .onChange(of: geometry.safeAreaInsets, initial: true) { _, insets in
+                horizontalSafeAreaInsets = (insets.leading, insets.trailing)
+            }
         }
         .background(viewBackgroundColor)
         .ignoresSafeArea(edges: .top)
@@ -675,6 +719,9 @@ struct ChannelView: View {
             .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                 viewWidth = newWidth
             }
+            .onChange(of: geometry.safeAreaInsets, initial: true) { _, insets in
+                horizontalSafeAreaInsets = (insets.leading, insets.trailing)
+            }
         }
         .confirmationDialog(
             String(localized: "channel.unsubscribe.confirmation.title"),
@@ -727,6 +774,7 @@ struct ChannelView: View {
 
             if !isDescriptionScrollLocked {
                 tvOSSubscribeButton
+                tvOSSubscriptionDestinationsButton
             }
 
             if let description, !description.isEmpty {
@@ -742,11 +790,6 @@ struct ChannelView: View {
         .padding(.vertical, 8)
         .frame(maxHeight: .infinity, alignment: .top)
         .animation(.easeInOut(duration: 0.25), value: isDescriptionScrollLocked)
-    }
-
-    @ViewBuilder
-    private func tvOSAvatar(for channel: Channel) -> some View {
-        tvOSAvatar(name: channel.name, thumbnailURL: channel.thumbnailURL)
     }
 
     @ViewBuilder
@@ -789,7 +832,34 @@ struct ChannelView: View {
             .font(.headline)
         }
         .buttonStyle(.borderedProminent)
+        .disabled(!allowsCurrentContextMutation)
         .focused($isSubscribeFocused)
+    }
+
+    /// The destination list, as its own button: a menu is unusable with a
+    /// remote, and the primary tap has to stay the current account's toggle.
+    @ViewBuilder
+    private var tvOSSubscriptionDestinationsButton: some View {
+        if let channelToSubscribe, SubscriptionDestinations.areOffered(in: appEnvironment) {
+            Button {
+                showingSubscriptionDestinations = true
+            } label: {
+                Label(
+                    String(localized: "channel.menu.subscribeOn"),
+                    systemImage: "person.crop.circle.badge.plus"
+                )
+                .frame(maxWidth: .infinity, minHeight: 60)
+            }
+            .buttonStyle(.bordered)
+            .fullScreenCover(isPresented: $showingSubscriptionDestinations) {
+                SubscriptionDestinationPicker(
+                    channel: channelToSubscribe,
+                    membership: destinationMembership
+                ) { context, subscribed in
+                    destinationDidToggle(context, subscribed: subscribed)
+                }
+            }
+        }
     }
 
     private var tvOSTabButtons: some View {
@@ -934,6 +1004,9 @@ struct ChannelView: View {
             .onChange(of: geometry.size.width, initial: true) { _, newWidth in
                 viewWidth = newWidth
             }
+            .onChange(of: geometry.safeAreaInsets, initial: true) { _, insets in
+                horizontalSafeAreaInsets = (insets.leading, insets.trailing)
+            }
         }
     }
     #endif
@@ -1031,16 +1104,23 @@ struct ChannelView: View {
             let pinOffset = (!isRegularSizeClass && scrollOffset < 0) ? scrollOffset : 0
             // Zoom scale for banner and gradient (iPhone only)
             let zoomScale = isRegularSizeClass ? 1 : (1 + max(-scrollOffset / 400, 0))
+            // iPhone: the scroll content is inset by the horizontal safe area, so the
+            // banner is widened to reach under it (iPad/Mac use backgroundExtensionEffect).
+            let bannerLeadingBleed = isRegularSizeClass ? 0 : horizontalSafeAreaInsets.leading
+            let bannerTrailingBleed = isRegularSizeClass ? 0 : horizontalSafeAreaInsets.trailing
+            let bannerWidth = geometry.size.width + bannerLeadingBleed + bannerTrailingBleed
+            // The ZStack centers the wider banner; shift it so each side bleeds by its own inset.
+            let bannerXOffset = (bannerTrailingBleed - bannerLeadingBleed) / 2
 
             ZStack(alignment: .top) {
                 // Banner image
                 // iPad/Mac: static with backgroundExtensionEffect for Liquid Glass sidebar
                 // iPhone: zoom/scale + pinOffset to keep banner fixed at top when pulling down
                 bannerImage(url: bannerURL)
-                    .frame(width: geometry.size.width, height: headerHeight)
+                    .frame(width: bannerWidth, height: headerHeight)
                     .clipped()
                     .scaleEffect(zoomScale, anchor: .top)
-                    .offset(y: pinOffset)
+                    .offset(x: bannerXOffset, y: pinOffset)
                     .modifier(BackgroundExtensionModifier(
                         useBackgroundExtension: isRegularSizeClass
                     ))
@@ -1051,10 +1131,10 @@ struct ChannelView: View {
                     startPoint: .center,
                     endPoint: .bottom
                 )
-                .frame(width: geometry.size.width, height: headerHeight * 0.7)
+                .frame(width: bannerWidth, height: headerHeight * 0.7)
                 .offset(y: headerHeight * 0.3)
                 .scaleEffect(zoomScale, anchor: .top)
-                .offset(y: pinOffset)
+                .offset(x: bannerXOffset, y: pinOffset)
 
                 // Avatar and channel name - pinned to bottom of banner
                 #if os(macOS)
@@ -1103,7 +1183,7 @@ struct ChannelView: View {
                 .offset(y: clampedAvatarY + pinOffset)
                 .opacity(avatarOpacity)
             }
-            .frame(height: headerHeight)
+            .frame(width: geometry.size.width, height: headerHeight)
         }
         .frame(height: headerHeight)
     }
@@ -1186,17 +1266,36 @@ struct ChannelView: View {
     /// Toolbar menu for subscribe/unsubscribe and notification actions
     private var channelMenu: some View {
         Menu {
-            // Subscribe/Unsubscribe button
+            // Subscribe/Unsubscribe button, naming the account it writes to —
+            // the same answer "Subscribe On…" would give for the same target.
             Button {
                 toggleSubscription()
             } label: {
                 Label(
-                    isSubscribed
-                        ? String(localized: "channel.menu.unsubscribe")
-                        : String(localized: "channel.menu.subscribe"),
+                    mainSubscribeTitle,
                     systemImage: isSubscribed ? "person.fill.xmark" : "person.badge.plus"
                 )
             }
+            .disabled(!allowsCurrentContextMutation)
+
+            if !allowsCurrentContextMutation {
+                Text(String(localized: "channel.subscribe.contextUnavailable"))
+            }
+
+            // Naming a destination is a different decision from the one the
+            // main button makes, so it survives an unusable current context.
+            // tvOS reaches the same list through its own button — this menu is
+            // never presented there.
+            #if !os(tvOS)
+            if let channelToSubscribe {
+                SubscriptionDestinationMenu(
+                    channel: channelToSubscribe,
+                    membership: destinationMembership
+                ) { context, subscribed in
+                    destinationDidToggle(context, subscribed: subscribed)
+                }
+            }
+            #endif
 
             // Notifications toggle (only visible when subscribed)
             if isSubscribed {
@@ -1216,11 +1315,72 @@ struct ChannelView: View {
                 }
             }
         } label: {
-            Image(systemName: channelMenuIcon)
+            // A bare Image leaves the menu's accessibility title as the raw SF
+            // Symbol name; a Label carries the localized title to the AX bridge
+            // while `.iconOnly` keeps the toolbar rendering icon-only.
+            Label(String(localized: "channel.menu.title"), systemImage: channelMenuIcon)
+                .labelStyle(.iconOnly)
         }
+        .accessibilityLabel(Text(String(localized: "channel.menu.title")))
     }
 
     // MARK: - Subscription Actions
+
+    /// Whether the main button may write to the account being browsed.
+    ///
+    /// Local always may. A server account may only while it is usable: a
+    /// subscribe that cannot reach its account must be refused rather than
+    /// land in local data the user did not choose.
+    /// "Subscribe - Yattee iCloud" rather than a bare "Subscribe" — but only
+    /// while there is more than one place the write could land. With a single
+    /// destination the name answers a question nobody has.
+    private var mainSubscribeTitle: String {
+        guard let appEnvironment, SubscriptionDestinations.areOffered(in: appEnvironment) else {
+            return String(localized: isSubscribed ? "channel.menu.unsubscribe" : "channel.menu.subscribe")
+        }
+
+        let key: String.LocalizationValue = isSubscribed
+            ? "channel.menu.unsubscribe.withAccount"
+            : "channel.menu.subscribe.withAccount"
+        let title = DataContextSwitcherLabels.title(
+            for: appEnvironment.accountsManager.currentContext,
+            in: appEnvironment
+        )
+        return String(format: String(localized: key), title)
+    }
+
+    private var allowsCurrentContextMutation: Bool {
+        guard let appEnvironment else { return false }
+        guard !appEnvironment.accountsManager.currentContext.isLocal else { return true }
+        return appEnvironment.dataContextValidator.allowsServerMutations
+    }
+
+    /// The channel as it must be stored: the id carries the source this view
+    /// was opened for, which an extracted channel does not report itself.
+    ///
+    /// Before the load answers, the cached header stands in — the id is already
+    /// known and the header carries the name a subscription stores — so
+    /// "Subscribe On…" is usable as soon as the main button is, not only once
+    /// the channel request finishes. External channels keep waiting: their real
+    /// id only exists after extraction.
+    private var channelToSubscribe: Channel? {
+        if let channel {
+            return Channel(
+                id: ChannelID(source: source, channelID: channel.id.channelID),
+                name: channel.name,
+                subscriberCount: channel.subscriberCount,
+                thumbnailURL: channel.thumbnailURL
+            )
+        }
+
+        guard !isExternalChannel, let cachedHeader, !cachedHeader.name.isEmpty else { return nil }
+        return Channel(
+            id: ChannelID(source: source, channelID: channelID),
+            name: cachedHeader.name,
+            subscriberCount: cachedHeader.subscriberCount,
+            thumbnailURL: cachedHeader.thumbnailURL
+        )
+    }
 
     private func toggleSubscription() {
         if isSubscribed {
@@ -1231,34 +1391,81 @@ struct ChannelView: View {
     }
 
     private func subscribe() async {
-        guard let channel,
+        guard let channelToSubscribe,
               let subscriptionService = appEnvironment?.subscriptionService,
               let dataManager = appEnvironment?.dataManager else { return }
 
-        let author = Author(
-            id: channel.id.channelID,
-            name: channel.name,
-            thumbnailURL: channel.thumbnailURL,
-            subscriberCount: channel.subscriberCount
-        )
-
         do {
-            try await subscriptionService.subscribe(to: author, source: source)
-            
+            try await subscriptionService.subscribe(to: channelToSubscribe)
+
             // Set default notification preference for new subscription
             let defaultNotifications = appEnvironment?.settingsManager.defaultNotificationsForNewChannels ?? false
             if defaultNotifications {
-                dataManager.setNotificationsEnabled(true, for: channel.id.channelID)
+                dataManager.setNotificationsEnabled(true, for: channelToSubscribe.id.channelID)
             }
-            
+
             isSubscribed = true
+            noteMainButtonToggled(subscribed: true)
             refreshSubscription()
+            showSubscriptionToast(subscribed: true)
         } catch {
             appEnvironment?.toastManager.showError(
                 String(localized: "channel.subscribe.error.title"),
                 subtitle: error.localizedDescription
             )
         }
+    }
+
+    /// The same toast a destination row shows, for the main button's write:
+    /// title says what happened, subtitle names the account it landed on —
+    /// under the same rule as the menu label, only when there is more than one
+    /// account it could have landed on.
+    private func showSubscriptionToast(subscribed: Bool) {
+        guard let appEnvironment else { return }
+
+        let subtitle: String? = SubscriptionDestinations.areOffered(in: appEnvironment)
+            ? DataContextSwitcherLabels.title(
+                for: appEnvironment.accountsManager.currentContext,
+                in: appEnvironment
+            )
+            : nil
+
+        appEnvironment.toastManager.showSuccess(
+            String(
+                localized: subscribed
+                    ? "channel.subscribe.destination.subscribed"
+                    : "channel.subscribe.destination.unsubscribed"
+            ),
+            subtitle: subtitle
+        )
+    }
+
+    /// The main button wrote to the currently selected context; the destination
+    /// row naming that context still carries the mark from before the write, so
+    /// it is told — otherwise its next tap does the opposite of what it shows.
+    private func noteMainButtonToggled(subscribed: Bool) {
+        guard let context = appEnvironment?.accountsManager.currentContext else { return }
+        destinationMembership.noteToggled(context, subscribed: subscribed)
+    }
+
+    /// A destination row toggled something. Only the account on screen changes
+    /// what the main button says, and notification preferences are local and
+    /// keyed by channel, so they follow the same rule.
+    ///
+    /// Compared against the *effective* context, which is what the button reads
+    /// from: while the selected account is unavailable the button speaks for
+    /// local data, and the menu offers Local precisely so the user can act on it
+    /// — a toggle there has to be the one the button then shows.
+    private func destinationDidToggle(_ context: DataContext, subscribed: Bool) {
+        guard context == appEnvironment?.dataContextValidator.effectiveContext else { return }
+
+        if subscribed,
+           appEnvironment?.settingsManager.defaultNotificationsForNewChannels == true,
+           let channelID = channelToSubscribe?.id.channelID {
+            appEnvironment?.dataManager.setNotificationsEnabled(true, for: channelID)
+        }
+
+        refreshSubscription()
     }
 
     private func unsubscribe() {
@@ -1268,7 +1475,8 @@ struct ChannelView: View {
             do {
                 try await appEnvironment?.subscriptionService.unsubscribe(from: channel.id.channelID)
                 isSubscribed = false
-                subscription = nil
+                noteMainButtonToggled(subscribed: false)
+                showSubscriptionToast(subscribed: false)
             } catch {
                 appEnvironment?.toastManager.showError(
                     String(localized: "channel.unsubscribe.error.title"),
@@ -2040,13 +2248,6 @@ struct ChannelView: View {
         isSearchLoading = false
     }
 
-    private func clearSearch() {
-        isSearchActive = false
-        hasSearched = false
-        searchResults = .empty
-        searchText = ""
-    }
-
     // MARK: - Error View
 
     private func errorView(_ error: String) -> some View {
@@ -2065,11 +2266,6 @@ struct ChannelView: View {
     }
 
     // MARK: - Helpers
-
-    private func formatSubscribers(_ count: Int) -> String {
-        let formatted = CountFormatter.compact(count)
-        return String(localized: "channel.subscriberCount \(formatted)")
-    }
 
     /// Returns the appropriate instance for the channel's content source
     private func instanceForSource() -> Instance? {
@@ -2097,13 +2293,7 @@ struct ChannelView: View {
         isLoading = true
         errorMessage = nil
 
-        // Load subscription state: optimistic from the local store, then
-        // corrected by the active provider (server accounts differ from local)
-        subscription = appEnvironment.dataManager.subscription(for: channelID)
-        isSubscribed = subscription != nil
-        Task {
-            isSubscribed = await appEnvironment.subscriptionService.isSubscribed(to: channelID)
-        }
+        refreshSubscription()
 
         // Load cached header data for immediate display
         cachedHeader = CachedChannelData.load(for: channelID, using: appEnvironment.dataManager)
@@ -2214,11 +2404,7 @@ struct ChannelView: View {
                 isLoading = false
 
                 // Check subscription status using extracted channel ID
-                subscription = appEnvironment.dataManager.subscription(for: fetchedChannel.id.channelID)
-                isSubscribed = subscription != nil
-                Task {
-                    isSubscribed = await appEnvironment.subscriptionService.isSubscribed(to: fetchedChannel.id.channelID)
-                }
+                refreshSubscription()
             }
         } catch let error as APIError {
             await MainActor.run {
@@ -2248,15 +2434,33 @@ struct ChannelView: View {
         }
     }
 
+    /// Re-reads the button's state from the account being browsed.
+    ///
+    /// The local store is only consulted when it *is* the active context: under
+    /// a server account it holds another account's channels, and reading it
+    /// first would show the wrong button until the provider answered.
     private func refreshSubscription() {
         // Use loaded channel's ID if available (important for external channels
         // where navigation channelID is the URL, not the actual channel ID)
         let effectiveChannelID = channel?.id.channelID ?? channelID
-        subscription = appEnvironment?.dataManager.subscription(for: effectiveChannelID)
-        isSubscribed = subscription != nil
+
+        if appEnvironment?.dataContextValidator.effectiveContext.isLocal == true {
+            isSubscribed = appEnvironment?.dataManager.subscription(for: effectiveChannelID) != nil
+        }
+
+        subscriptionGeneration += 1
+        let generation = subscriptionGeneration
+
         Task {
             if let service = appEnvironment?.subscriptionService {
-                isSubscribed = await service.isSubscribed(to: effectiveChannelID)
+                let subscribed = await service.isSubscribed(to: effectiveChannelID)
+                // This view is reused as the user navigates from channel to
+                // channel, and the answer may have been asked for under another
+                // account entirely. Either way it no longer describes the button
+                // it would be written to.
+                guard generation == subscriptionGeneration,
+                      (channel?.id.channelID ?? channelID) == effectiveChannelID else { return }
+                isSubscribed = subscribed
             }
         }
     }

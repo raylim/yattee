@@ -329,7 +329,140 @@ actor CloudKitConflictResolver {
             resolved["updatedAt"] = local["updatedAt"]
             resolved["layoutJSON"] = local["layoutJSON"]
         }
-        
+
         return resolved
+    }
+
+    // MARK: - ChannelNotificationSettings Conflict Resolution
+
+    /// Resolves a conflict between local and server channel notification settings.
+    ///
+    /// Strategy:
+    /// - Last write wins based on updatedAt timestamp — the same rule
+    ///   `DataManager.upsertChannelNotificationSettings` applies on arrival, so a
+    ///   record that wins the upload is never refused by the other device.
+    /// - An exact tie keeps the server value and needs no deterministic
+    ///   tiebreaker: unlike accounts and data contexts, no writer stamps these
+    ///   settings with a fixed epoch date, so a tie is an accident of the clock
+    ///   rather than something migration produces on every device.
+    /// - Preserve server recordChangeTag
+    func resolveChannelNotificationSettingsConflict(
+        local: CKRecord,
+        server: CKRecord
+    ) -> CKRecord {
+        let localUpdated = (local["updatedAt"] as? Date) ?? Date.distantPast
+        let serverUpdated = (server["updatedAt"] as? Date) ?? Date.distantPast
+
+        // IMPORTANT: Always start with server record to preserve recordChangeTag
+        let resolved = server
+
+        // If local is newer, copy its fields to server record
+        if localUpdated > serverUpdated {
+            resolved["notificationsEnabled"] = local["notificationsEnabled"]
+            resolved["updatedAt"] = local["updatedAt"]
+            resolved["sourceRawValue"] = local["sourceRawValue"]
+            resolved["instanceURLString"] = local["instanceURLString"]
+            resolved["globalProvider"] = local["globalProvider"]
+        }
+
+        return resolved
+    }
+
+    // MARK: - Account Conflict Resolution
+
+    /// Resolves a conflict between local and server account records.
+    ///
+    /// Strategy:
+    /// - Last write wins on the app-managed `updatedAt`, never on CloudKit's
+    ///   modification date: an edit made offline has to stay orderable against
+    ///   a concurrent edit elsewhere, and a migrated account carries an
+    ///   epoch-old date precisely so any real edit outranks it.
+    /// - An exact tie is settled by the label, so two devices that edited in the
+    ///   same instant — or migrated the same account, all of which are stamped
+    ///   at the epoch — converge instead of each keeping its own. This has to
+    ///   match `Account.isOutranked`, or a record could win the upload and still
+    ///   be refused on arrival.
+    func resolveAccountConflict(
+        local: CKRecord,
+        server: CKRecord
+    ) -> CKRecord {
+        let localUpdated = (local["updatedAt"] as? Date) ?? Date.distantPast
+        let serverUpdated = (server["updatedAt"] as? Date) ?? Date.distantPast
+
+        let localWins: Bool
+        if localUpdated != serverUpdated {
+            localWins = localUpdated > serverUpdated
+        } else {
+            localWins = ((local["displayName"] as? String) ?? "") > ((server["displayName"] as? String) ?? "")
+        }
+
+        // IMPORTANT: Always start with server record to preserve recordChangeTag
+        let resolved = server
+
+        if localWins {
+            resolved["displayName"] = local["displayName"]
+            // A local record built before the field existed carries no value;
+            // clearing the server's would flip the account back to active, so
+            // absence leaves the server copy standing.
+            if local["isActive"] != nil {
+                resolved["isActive"] = local["isActive"]
+            }
+            resolved["updatedAt"] = local["updatedAt"]
+        }
+
+        return resolved
+    }
+
+    // MARK: - DataContext Conflict Resolution
+
+    /// Resolves a conflict between local and server data-context records.
+    ///
+    /// Strategy: last write wins on the app-managed `changedAt` — the moment
+    /// the user chose, not the moment a record happened to be written — with
+    /// an exact tie settled by the selected account's ID.
+    ///
+    /// The tie is not hypothetical: every migrated context is stamped at the
+    /// epoch, so two devices migrating different legacy selections produce
+    /// identical timestamps. This has to match `StoredDataContext.isOutranked`,
+    /// or a record could win the upload and still be refused on arrival.
+    func resolveDataContextConflict(
+        local: CKRecord,
+        server: CKRecord
+    ) -> CKRecord {
+        let localChanged = (local["changedAt"] as? Date) ?? Date.distantPast
+        let serverChanged = (server["changedAt"] as? Date) ?? Date.distantPast
+
+        let localWins: Bool
+        if localChanged != serverChanged {
+            localWins = localChanged > serverChanged
+        } else {
+            let localKey = (local["accountID"] as? String) ?? ""
+            let serverKey = (server["accountID"] as? String) ?? ""
+            localWins = localKey > serverKey
+        }
+
+        let resolved = server
+
+        if localWins {
+            resolved["contextKind"] = local["contextKind"]
+            resolved["accountID"] = local["accountID"]
+            resolved["changedAt"] = local["changedAt"]
+        }
+
+        return resolved
+    }
+
+    // MARK: - Write-Once Conflict Resolution
+
+    /// Resolves a conflict on a record that only ever means "this happened":
+    /// the legacy-migration markers and the account deletion tombstones.
+    ///
+    /// There is no state to merge — both sides assert the same fact — so the
+    /// server's copy is kept, which also preserves its change tag.
+    func resolveWriteOnceConflict(
+        local _: CKRecord,
+        server: CKRecord
+    ) -> CKRecord {
+        server
     }
 }

@@ -7,6 +7,10 @@
 //  - Overlay: Panel floats over full-width player, appears with controls
 //  - Pinned: Player resizes to make room for panel
 //
+//  iPhone uses the overlay mode only, always on the right. iPad/macOS default
+//  to pinned, can unpin with the pin button, and pick the side in the preset's
+//  panel settings.
+//
 
 import SwiftUI
 
@@ -44,9 +48,11 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
     private var video: Video? { playerState?.currentVideo }
 
     private var panelSide: FloatingPanelSide {
-        settingsManager?.floatingDetailsPanelSide ?? .left
+        if PanelSettings.isSectionsOnlyDevice { return .right }
+        return playerControlsLayout.effectivePanelSettings.effectiveWideLayoutSide
     }
 
+    /// `landscapeDetailsPanelPinned` already resolves to `false` on iPhone.
     private var isPanelPinned: Bool {
         settingsManager?.landscapeDetailsPanelPinned ?? false
     }
@@ -95,6 +101,7 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             isPanelVisible.toggle()
             settingsManager?.landscapeDetailsPanelVisible = isPanelVisible
+            settingsManager?.landscapeDetailsPanelLastVisible = isPanelVisible
         }
     }
 
@@ -102,16 +109,23 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
     private func hidePanel() {
         isPanelVisible = false
         settingsManager?.landscapeDetailsPanelVisible = false
+        settingsManager?.landscapeDetailsPanelLastVisible = false
     }
+
+    #if os(iOS)
+    /// The app's window, looked up from any foreground scene. Notification
+    /// Center and Control Center move the scene to `.foregroundInactive`, so
+    /// requiring `.foregroundActive` would drop the safe area to zero while
+    /// they are open and make the panel jump to the screen edge.
+    private var foregroundWindow: UIWindow? {
+        UIApplication.shared.foregroundWindow
+    }
+    #endif
 
     /// Get safe area insets from window scene (geometry reader insets are 0 when .ignoresSafeArea is used)
     private var windowSafeAreaInsets: EdgeInsets {
         #if os(iOS)
-        guard let windowScene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }),
-              let window = windowScene.windows.first
-        else { return EdgeInsets() }
+        guard let window = foregroundWindow else { return EdgeInsets() }
         let insets = window.safeAreaInsets
         return EdgeInsets(top: insets.top, leading: insets.left, bottom: insets.bottom, trailing: insets.right)
         #else
@@ -121,16 +135,11 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
 
     /// Get full screen bounds from window scene (ignores safe area constraints from parent)
     /// On macOS, this is not used - geometry reader size is used directly
-    private var windowSceneBounds: CGSize {
+    private func windowSceneBounds(fallback: CGSize) -> CGSize {
         #if os(iOS)
-        guard let windowScene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }),
-              let window = windowScene.windows.first
-        else {
-            // Fallback to screen bounds
-            let screen = UIScreen.main.bounds
-            return CGSize(width: max(screen.width, screen.height), height: min(screen.width, screen.height))
+        guard let window = foregroundWindow else {
+            // Fallback to the space this view was actually offered
+            return fallback
         }
         // Window frame gives actual size including orientation
         return window.frame.size
@@ -144,7 +153,7 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
             // On iOS: Use window bounds to get full size (avoids safe area constraint from parent)
             // On macOS: Use geometry reader size directly (no safe area concerns, window is the source of truth)
             #if os(iOS)
-            let windowBounds = windowSceneBounds
+            let windowBounds = windowSceneBounds(fallback: geometry.size)
             let availableWidth = windowBounds.width
             let availableHeight = windowBounds.height
             let safeAreaLeft = windowSafeAreaInsets.leading
@@ -167,9 +176,14 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
             // Detect which side has Dynamic Island based on interface orientation
             // Note: Can't use safe area comparison because both sides have similar values (~62px each)
             #if os(iOS)
-            let interfaceOrientation = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first?
+            // TODO: Modernization - This distinguishes landscapeLeft from landscapeRight to locate
+            // the Dynamic Island, which window bounds/size classes cannot express. Read the
+            // orientation from the hosting scene's `effectiveGeometry.interfaceOrientation`
+            // (iOS 26+) instead of the deprecated `UIWindowScene.interfaceOrientation` once the
+            // deployment target allows, and consider `traitCollection.verticalBarEdge` (iOS 27.1)
+            // for the bar-edge question. Global scene lookup should be replaced by the hosting
+            // window (e.g. via a UIViewRepresentable reading `view.window?.windowScene`).
+            let interfaceOrientation = UIApplication.shared.foregroundWindowScene?
                 .interfaceOrientation ?? .unknown
             // landscapeLeft = home/gesture bar on left = Dynamic Island on RIGHT
             // landscapeRight = home/gesture bar on right = Dynamic Island on LEFT
@@ -296,6 +310,14 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
             // Persist panel width changes to settings
             settingsManager?.floatingDetailsPanelWidth = newWidth
         }
+        .onChange(of: settingsManager?.landscapeDetailsPanelVisible) { _, newValue in
+            // External writes (e.g. the preset's default visibility applied
+            // after the async layout load) must reach the local state too.
+            guard let newValue, newValue != isPanelVisible else { return }
+            withAnimation(.easeInOut(duration: 0.3)) {
+                isPanelVisible = newValue
+            }
+        }
         .ignoresSafeArea(.all)
         #if os(iOS)
         .persistentSystemOverlays(.hidden)
@@ -337,17 +359,13 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
                     // Pinning - ensure panel is visible first
                     isPanelVisible = true
                     settingsManager?.landscapeDetailsPanelVisible = true
+                    settingsManager?.landscapeDetailsPanelLastVisible = true
 
                     // Animate panscan to zero and pin concurrently for smooth transition
                     appEnvironment?.navigationCoordinator.animatePanscanToZero(completion: nil)
                     withAnimation(.easeInOut(duration: 0.3)) {
                         settingsManager?.landscapeDetailsPanelPinned = true
                     }
-                }
-            },
-            onAlignmentToggle: {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    settingsManager?.floatingDetailsPanelSide = panelSide.opposite
                 }
             },
             isPinned: isPanelPinned,
@@ -359,11 +377,6 @@ struct WideScreenPlayerLayout<PlayerContent: View>: View {
             maxPanelWidth: maxPanelWidth(availableWidth: availableWidth),
             playerControlsLayout: playerControlsLayout
         )
-    }
-
-    /// Returns the first enabled Yattee Server instance URL, if any.
-    private var yatteeServerURL: URL? {
-        appEnvironment?.instancesManager.yatteeServerInstances.first { $0.isEnabled }?.url
     }
 }
 

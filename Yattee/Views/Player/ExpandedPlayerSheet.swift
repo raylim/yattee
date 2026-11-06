@@ -13,27 +13,39 @@ import SwiftUI
 
 struct ExpandedPlayerSheet: View {
     @Environment(\.appEnvironment) var appEnvironment
-    @Environment(\.dismiss) private var dismiss
 
     // MARK: - Sheet State
 
     @State var showingQualitySheet = false
-    @State var showingPlaylistSheet = false
-    @State var showingDownloadSheet = false
     @State var showingDeleteDownloadAlert = false
-    @State var showingQueueSheet = false
-    @State var showingErrorSheet = false
     @State var isCommentsExpanded: Bool = false
     @State var commentsDismissOffset: CGFloat = 0
     /// Direct scroll position control - use scrollTo(y:) to scroll to top
     @State var scrollPosition: ScrollPosition = .init(y: 0)
-    @State private var showScrollButton = false
-    @State private var currentScrollOffset: CGFloat = 0
     @State var currentPlayerHeight: CGFloat = 0
-    @State private var isBottomOverscroll: Bool = false
     @State var isPortraitPanelVisible: Bool = true
     /// Temporarily hide controls during fullscreen transition to avoid animation glitch
     @State var hideControlsDuringTransition: Bool = false
+
+    /// Resolves the preset's default panel visibility for one orientation
+    /// from the cached settings, so creators of this view can seed the initial
+    /// state BEFORE the first frame — applying it in onAppear animates a
+    /// visible top-to-center video jump during player expansion.
+    @MainActor
+    static func initialPanelVisibility(for orientation: PanelOrientation, settingsManager: SettingsManager?) -> Bool {
+        PanelSettings.cached.effectiveDefaultVisibility(for: orientation)
+            .resolve(lastVisible: settingsManager?.detailsPanelLastVisible(for: orientation) ?? false)
+    }
+
+    /// Portrait shorthand for `initialPanelVisibility(for:settingsManager:)`.
+    @MainActor
+    static func initialPortraitPanelVisibility(settingsManager: SettingsManager?) -> Bool {
+        initialPanelVisibility(for: .portrait, settingsManager: settingsManager)
+    }
+
+    init(initialPortraitPanelVisible: Bool = true) {
+        _isPortraitPanelVisible = State(initialValue: initialPortraitPanelVisible)
+    }
 
     // MARK: - Panel Drag State
 
@@ -51,12 +63,13 @@ struct ExpandedPlayerSheet: View {
     @State var panelExpandOffset: CGFloat = 0
     /// Whether to use compact panel (no description) - animated state
     @State var useCompactPanel: Bool = false
-    @State var showFormattedDate = false
-    @State var showOriginalTitle = false
     /// Track if we're in widescreen layout for status bar hiding
     @State private var isInWideScreenLayout = false
     /// Active player controls layout from preset (loaded once, updated on notification)
-    @State var playerControlsLayout: PlayerControlsLayout = .default
+    // Seeded from the warm cache so the first frames resolve the correct
+    // layout (corner mode) instead of flashing the default stacked layout;
+    // loadPlayerControlsLayout replaces it with the authoritative value.
+    @State var playerControlsLayout: PlayerControlsLayout = PlayerControlsLayout.cached
 
     // MARK: - Autoplay Countdown State
 
@@ -79,14 +92,17 @@ struct ExpandedPlayerSheet: View {
     /// Task for preloading comments - cancelled when video changes
     @State var commentsPreloadTask: Task<Void, Never>?
 
-    /// Namespace for matchedGeometryEffect transitions
-    @Namespace var playerNamespace
-
     // MARK: - Layout State (iOS)
 
     #if os(iOS)
     /// Track previous orientation to detect changes
     @State private var previousIsLandscape: Bool?
+    /// Foldable hinge partially open (iPhone Duo laptop position): the
+    /// fullscreen portrait layout keeps the video on the upper half and
+    /// moves every control to the lower half.
+    /// Seeded from the last hinge report so a re-presented player starts in
+    /// the right layout instead of animating into it.
+    @State var isTabletopHinge = HingeLayoutObserver.lastKnownTabletop
     #endif
 
     #if os(iOS) || os(macOS)
@@ -100,9 +116,7 @@ struct ExpandedPlayerSheet: View {
 
     var playerService: PlayerService? { appEnvironment?.playerService }
     var playerState: PlayerState? { playerService?.state }
-    var downloadManager: DownloadManager? { appEnvironment?.downloadManager }
     var navigationCoordinator: NavigationCoordinator? { appEnvironment?.navigationCoordinator }
-    var accentColor: Color { appEnvironment?.settingsManager.resolvedAccentColor ?? .accentColor }
 
     #if os(iOS)
     var inAppOrientationLock: Bool { appEnvironment?.settingsManager.inAppOrientationLock ?? false }
@@ -116,19 +130,8 @@ struct ExpandedPlayerSheet: View {
     // MARK: - Queue Helpers
 
     var queue: [QueuedVideo] { playerState?.queue ?? [] }
-    var history: [QueuedVideo] { playerState?.history ?? [] }
     var isQueueEnabled: Bool { appEnvironment?.settingsManager.queueEnabled ?? true }
     var hasQueueItems: Bool { !queue.isEmpty && isQueueEnabled }
-
-    // MARK: - Player Pill Helpers
-
-    var playerPillSettings: PlayerPillSettings {
-        playerControlsLayout.effectivePlayerPillSettings
-    }
-    var shouldShowPlayerPill: Bool {
-        playerPillSettings.visibility.isVisible(isWideLayout: true) &&
-        !playerPillSettings.buttons.isEmpty
-    }
 
     // MARK: - Autoplay Helpers
 
@@ -155,7 +158,6 @@ struct ExpandedPlayerSheet: View {
         let isFailed = if case .failed = state { true } else { false }
         let hasBackend = playerService?.currentBackend != nil && !isLoading && !isIdle && !isEnded && !isFailed
         return PlaybackInfo(
-            state: state,
             isLoading: isLoading,
             isIdle: isIdle,
             isEnded: isEnded,
@@ -164,14 +166,27 @@ struct ExpandedPlayerSheet: View {
         )
     }
 
+    // MARK: - Shared Sheets
+
+    /// Presents through the player's sheet host. The host sits inside this
+    /// view's body, so this view's own environment can't reach it; the global
+    /// request does, because the player host takes requests while it is up.
+    func presentSheet(_ sheet: AppSheet) {
+        appEnvironment?.navigationCoordinator.presenter.present(sheet)
+    }
+
+    func presentAddToPlaylist() {
+        guard let video = playerState?.currentVideo else { return }
+        presentSheet(.addToPlaylist(video))
+    }
+
     // MARK: - Body
 
     var body: some View {
+        let _ = PerfCounter.body("ExpandedPlayerSheet")
         playerContentWithOverlays
             .applyPlayerSheets(
                 showingQualitySheet: $showingQualitySheet,
-                showingPlaylistSheet: $showingPlaylistSheet,
-                showingDownloadSheet: $showingDownloadSheet,
                 showingDeleteDownloadAlert: $showingDeleteDownloadAlert,
                 onStreamSelected: { stream, audioStream in
                     switchToStream(stream, audioStream: audioStream)
@@ -190,13 +205,14 @@ struct ExpandedPlayerSheet: View {
                 scrollPosition: $scrollPosition,
                 isPanelExpanded: $isPanelExpanded,
                 panelExpandOffset: $panelExpandOffset,
-                showOriginalTitle: $showOriginalTitle,
                 isThumbnailFrozen: $isThumbnailFrozen,
                 displayedThumbnailURL: $displayedThumbnailURL,
                 displayedThumbnailImage: $displayedThumbnailImage,
                 isAutoplayCancelled: $isAutoplayCancelled,
                 pendingScrollToTopOnHeightChange: $pendingScrollToTopOnHeightChange,
                 playerControlsLayout: $playerControlsLayout,
+                isPortraitPanelVisible: $isPortraitPanelVisible,
+                isInWideScreenLayout: isInWideScreenLayout,
                 stopAutoplayCountdown: stopAutoplayCountdown,
                 startAutoplayCountdown: startAutoplayCountdown,
                 startPreloadingComments: startPreloadingComments,
@@ -259,7 +275,8 @@ struct ExpandedPlayerSheet: View {
                     onClose: collapseComments,
                     onDismissOffsetChanged: handleCommentsDismissOffset,
                     onDismissGestureEnded: handleCommentsDismissGestureEnded,
-                    dismissThreshold: 30
+                    dismissThreshold: 30,
+                    showAvatars: playerControlsLayout.effectivePanelSettings.commentsShowAvatars
                 )
                 .frame(height: max(0, commentsHeight))
                 .clipped()
@@ -291,12 +308,37 @@ struct ExpandedPlayerSheet: View {
         .ignoresSafeArea(edges: .bottom)
     }
 
+    #if os(iOS)
+    /// Whether the status bar and home indicator are hidden for the current
+    /// layout state (see the modifier site for the rationale).
+    private var hidesSystemOverlays: Bool {
+        if navigationCoordinator?.isCornerLayoutActive == true {
+            return UIDevice.current.userInterfaceIdiom == .phone
+                || !(appEnvironment?.settingsManager.landscapeDetailsPanelVisible ?? true)
+        }
+        return isInWideScreenLayout || !isPortraitPanelVisible
+    }
+    #endif
+
     // MARK: - Player Content
 
     @ViewBuilder
     private var playerContent: some View {
         GeometryReader { geometry in
             let wideScreen = isWideScreenLayout(size: geometry.size)
+            #if os(iOS) || os(macOS)
+            // Gate on the full size including safe areas: the corner layout
+            // shows the status bar, which would otherwise shrink the measured
+            // height and flip the decision back (layout oscillation).
+            let fullSize = CGSize(
+                width: geometry.size.width + geometry.safeAreaInsets.leading + geometry.safeAreaInsets.trailing,
+                height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
+            )
+            let cornerActive = isCornerLayout(size: fullSize)
+            let cornerFits = cornerLayoutFits(size: fullSize)
+            #else
+            let cornerFits = false
+            #endif
 
             ZStack(alignment: .top) {
                 // Full-screen background - prevents content leaking during aspect ratio animation
@@ -313,10 +355,17 @@ struct ExpandedPlayerSheet: View {
                     Color.black.ignoresSafeArea(.all)
                 } else if wideScreen {
                     if let video = playerState?.currentVideo {
-                        // Widescreen layout with floating panel
-                        // Must ignore safe area to get full screen geometry
-                        wideScreenContent(video: video)
-                            .ignoresSafeArea(.all)
+                        if cornerActive {
+                            // Corner layout: video top-left with panel regions.
+                            // Laid out within the safe area (black background
+                            // extends beneath it).
+                            cornerContent(video: video)
+                        } else {
+                            // Widescreen layout with floating panel
+                            // Must ignore safe area to get full screen geometry
+                            wideScreenContent(video: video)
+                                .ignoresSafeArea(.all)
+                        }
                     } else {
                         // Widescreen loading state - just show black with spinner
                         Color.black
@@ -336,9 +385,29 @@ struct ExpandedPlayerSheet: View {
                 standardPlayerContent(geometry: geometry)
                 #endif
             }
+            #if os(iOS)
+            // Applied inside the animation-stripping transaction below so the
+            // hinge-driven tabletop switch still animates the video between
+            // the screen center and the upper half.
+            .animation(.easeInOut(duration: 0.3), value: isTabletopHinge)
+            #endif
             .transaction { transaction in
                 // Disable animations during layout switch to prevent position interpolation
                 transaction.animation = nil
+            }
+            #if os(iOS)
+            .observeHingeLayout(isTabletop: $isTabletopHinge)
+            #endif
+            #if os(iOS) || os(macOS)
+            .onChange(of: cornerActive) { _, newValue in
+                navigationCoordinator?.isCornerLayoutActive = newValue
+            }
+            .onChange(of: cornerFits, initial: true) { _, newValue in
+                navigationCoordinator?.cornerLayoutFits = newValue
+            }
+            #endif
+            .onChange(of: wideScreen, initial: true) { _, newValue in
+                navigationCoordinator?.isWideScreenLayoutActive = newValue
             }
             .onChange(of: wideScreen) { _, newValue in
                 isInWideScreenLayout = newValue
@@ -356,11 +425,14 @@ struct ExpandedPlayerSheet: View {
                     isPanelExpanded = false
                     panelExpandOffset = 0
 
-                    // Reset panel state to orientation defaults
+                    // Reset panel state to the preset's default visibility
                     if newValue {
-                        // Entering landscape: reset to hidden/unpinned
-                        appEnvironment?.settingsManager.landscapeDetailsPanelVisible = false
-                        appEnvironment?.settingsManager.landscapeDetailsPanelPinned = false
+                        // Entering landscape: apply the preset's default
+                        applyPanelDefaultVisibility(
+                            playerControlsLayout.effectivePanelSettings,
+                            cornerLayoutFits: cornerFits,
+                            settingsManager: appEnvironment?.settingsManager
+                        )
                         // Portrait panel doesn't exist in wide layout - clear flag so gesture handler allows pinch
                         navigationCoordinator?.isPortraitPanelVisible = false
                     }
@@ -372,37 +444,41 @@ struct ExpandedPlayerSheet: View {
             }
             .onAppear {
                 isInWideScreenLayout = wideScreen
+                #if os(iOS) || os(macOS)
+                navigationCoordinator?.isCornerLayoutActive = cornerActive
+                #endif
                 #if os(iOS)
                 previousIsLandscape = wideScreen
-                // Reset panel state on fresh player open (prevents stale state from previous session)
-                appEnvironment?.settingsManager.landscapeDetailsPanelVisible = false
-                appEnvironment?.settingsManager.landscapeDetailsPanelPinned = false
                 if wideScreen {
                     navigationCoordinator?.isPortraitPanelVisible = false
                 }
                 #endif
+                // Provisional pass on fresh player open (prevents stale panel
+                // state from a previous session). Uses the cached settings;
+                // loadPlayerControlsLayout re-applies the authoritative value.
+                if navigationCoordinator?.hasAppliedPanelDefaultVisibility != true {
+                    let visible = applyPanelDefaultVisibility(
+                        PanelSettings.cached,
+                        cornerLayoutFits: cornerFits,
+                        settingsManager: appEnvironment?.settingsManager
+                    )
+                    #if os(iOS) || os(macOS)
+                    LoggingService.shared.logPlayer("[ExpandedPlayerSheet] onAppear provisional apply: visible=\(visible), state=\(isPortraitPanelVisible), wideScreen=\(wideScreen)")
+                    // No animation: this is the opening state, not a user
+                    // toggle — animating it here slides the video mid-expand.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        isPortraitPanelVisible = visible
+                    }
+                    if !wideScreen {
+                        navigationCoordinator?.isPortraitPanelVisible = visible
+                    }
+                    #endif
+                }
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: commentsState == .loaded && !comments.isEmpty)
-        .sheet(isPresented: $showingQueueSheet) {
-            QueueManagementSheet()
-        }
-        .sheet(isPresented: $showingErrorSheet) {
-            ErrorDetailsSheet(errorMessage: playerState?.errorMessage ?? "Unknown error")
-        }
-        .sheet(item: Binding<Video?>(
-            get: { appEnvironment?.navigationCoordinator.descriptionLinkQueueSheetVideo },
-            set: { newValue in
-                if newValue == nil {
-                    appEnvironment?.navigationCoordinator.descriptionLinkQueueSheetVideo = nil
-                }
-            }
-        )) { video in
-            if let appEnvironment {
-                QueueActionSheet(video: video)
-                    .appEnvironment(appEnvironment)
-            }
-        }
         // Host the resolved/ambiguous link confirmation dialogs while the
         // expanded player is up so they appear above this sheet rather than
         // being buried underneath it on the root app view.
@@ -410,196 +486,21 @@ struct ExpandedPlayerSheet: View {
             shouldHost: (appEnvironment?.navigationCoordinator.isPlayerExpanded == true),
             appEnvironment: appEnvironment
         )
+        // Shared sheets opened from the player, and global requests while it
+        // is up, so they appear above the player window.
+        .appSheetHost(isTopLevel: appEnvironment?.navigationCoordinator.isPlayerExpanded == true, toastScope: .player)
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
-        .playerStatusBarHidden(isInWideScreenLayout || !isPortraitPanelVisible)
-        .persistentSystemOverlays((isInWideScreenLayout || !isPortraitPanelVisible) ? .hidden : .automatic)
+        // Corner layout with panels visible keeps the system status bar and
+        // home indicator on iPad (a thin strip); hiding the panels (fullscreen
+        // state) hides them so the video and controls reach the screen edges.
+        // On the iPhone Duo interior the landscape status bar is a ~57pt
+        // column plus top row that would inset the whole layout, so the
+        // corner layout always hides it there.
+        .playerStatusBarHidden(hidesSystemOverlays)
+        .persistentSystemOverlays(hidesSystemOverlays ? .hidden : .automatic)
         #endif
     }
-
-    // MARK: - Bottom Pills Overlay (iOS)
-
-    #if os(iOS)
-    /// Extracted overlay for player pill, comments pill and scroll button to help compiler type-checking
-    @ViewBuilder
-    private var bottomPillsOverlay: some View {
-        GeometryReader { geometry in
-            let hasCommentsPill = commentsState == .loaded && !comments.isEmpty
-            let isPlaying = playerState?.playbackState == .playing
-            // Disable play/pause when loading OR when thumbnail is still visible (buffer/frame not ready)
-            let isPlayPauseDisabled = playerState?.playbackState == .loading ||
-                                      playerState?.playbackState == .buffering ||
-                                      !(playerState?.isFirstFrameReady ?? false) ||
-                                      !(playerState?.isBufferReady ?? false)
-            let hasNext = playerState?.hasNext ?? false
-            // On narrow devices, use smaller side buttons so the player pill gets more horizontal space
-            let isCompactPillRow = geometry.size.width <= 390
-            let collapsedCommentWidth: CGFloat = isCompactPillRow ? 40 : 52
-            let scrollButtonWidth: CGFloat = isCompactPillRow ? 40 : 52
-            let pillRowSpacing: CGFloat = isCompactPillRow ? 8 : 12
-
-            VStack {
-                Spacer()
-
-                VStack(spacing: 12) {
-                    // Comments pill - on its own row (only when player pill exists)
-                    if hasCommentsPill, let firstComment = comments.first, shouldShowPlayerPill {
-                        CommentsPillView(
-                            comment: firstComment,
-                            isCollapsed: false,
-                            onTap: expandComments
-                        )
-                        .transition(.scale.combined(with: .opacity))
-                    }
-
-                    // Bottom row - centered group
-                    bottomPillsRow(
-                        hasCommentsPill: hasCommentsPill,
-                        collapsedCommentWidth: collapsedCommentWidth,
-                        pillRowSpacing: pillRowSpacing,
-                        isCompact: isCompactPillRow,
-                        isPlaying: isPlaying,
-                        hasNext: hasNext,
-                        isPlayPauseDisabled: isPlayPauseDisabled,
-                        scrollButtonWidth: scrollButtonWidth,
-                        availableWidth: geometry.size.width
-                    )
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
-                .background {
-                    // Block touches on description links behind pills area
-                    // Prevents accidental link taps when trying to tap pills
-                    Color.clear
-                        .contentShape(Rectangle())
-                }
-            }
-            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hasCommentsPill)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: shouldShowPlayerPill)
-            .animation(.easeInOut(duration: 0.2), value: showScrollButton)
-        }
-        .ignoresSafeArea(edges: .bottom)
-    }
-
-    /// Bottom row of pills (comments, player pill, scroll button) - extracted to help compiler
-    @ViewBuilder
-    private func bottomPillsRow(
-        hasCommentsPill: Bool,
-        collapsedCommentWidth: CGFloat,
-        pillRowSpacing: CGFloat,
-        isCompact: Bool,
-        isPlaying: Bool,
-        hasNext: Bool,
-        isPlayPauseDisabled: Bool,
-        scrollButtonWidth: CGFloat,
-        availableWidth: CGFloat
-    ) -> some View {
-        // Calculate max pill width: available width minus placeholders and spacing
-        // Layout: [16 padding] [left] [spacing] [PILL] [spacing] [right] [16 padding]
-        let edgeElementsWidth: CGFloat = 32 + collapsedCommentWidth + scrollButtonWidth + (pillRowSpacing * 2)
-        let maxPillWidth = max(availableWidth - edgeElementsWidth, 150)
-
-        HStack(spacing: pillRowSpacing) {
-            // Left side: comments pill or placeholder
-            if hasCommentsPill, let firstComment = comments.first {
-                if !shouldShowPlayerPill {
-                    // No player pill: expanded comments in bottom row
-                    CommentsPillView(
-                        comment: firstComment,
-                        isCollapsed: false,
-                        fillWidth: true,
-                        onTap: expandComments
-                    )
-                    .frame(maxWidth: 400)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .transition(.scale.combined(with: .opacity))
-                } else {
-                    // Placeholder (expanded comments on its own row)
-                    Color.clear
-                        .frame(width: collapsedCommentWidth, height: collapsedCommentWidth)
-                }
-            } else if shouldShowPlayerPill {
-                Color.clear
-                    .frame(width: collapsedCommentWidth, height: collapsedCommentWidth)
-            }
-
-            // Player pill
-            if shouldShowPlayerPill {
-                PlayerPillView(
-                    settings: playerPillSettings,
-                    maxWidth: maxPillWidth,
-                    isPlaying: isPlaying,
-                    hasNext: hasNext,
-                    queueCount: queue.count,
-                    queueModeIcon: playerState?.queueMode.icon ?? "list.bullet",
-                    isPlayPauseDisabled: isPlayPauseDisabled,
-                    isOrientationLocked: inAppOrientationLock,
-                    video: playerState?.currentVideo,
-                    playbackRate: playerState?.rate ?? .x1,
-                    showingPlaylistSheet: $showingPlaylistSheet,
-                    onQueueTap: { showingQueueSheet = true },
-                    onPrevious: {
-                        Task { await playerService?.playPrevious() }
-                    },
-                    onPlayPause: {
-                        playerService?.togglePlayPause()
-                    },
-                    onNext: {
-                        playNextInQueue()
-                    },
-                    onSeek: { signedSeconds in
-                        if signedSeconds >= 0 {
-                            playerService?.seekForward(by: signedSeconds)
-                        } else {
-                            playerService?.seekBackward(by: -signedSeconds)
-                        }
-                    },
-                    onClose: {
-                        appEnvironment?.queueManager.clearQueue()
-                        playerService?.stop()
-                        navigationCoordinator?.isPlayerExpanded = false
-                    },
-                    onAirPlay: { /* AirPlay - handled by system */ },
-                    onPiP: {
-                        if let mpvBackend = playerService?.currentBackend as? MPVBackend {
-                            mpvBackend.togglePiP()
-                        }
-                    },
-                    onOrientationLock: {
-                        appEnvironment?.settingsManager.inAppOrientationLock.toggle()
-                    },
-                    onRateChanged: { rate in
-                        playerState?.rate = rate
-                        playerService?.currentBackend?.rate = Float(rate.rawValue)
-                    }
-                )
-            }
-
-            // Scroll button or placeholder
-            if showScrollButton {
-                Button {
-                    scrollToTop()
-                } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: isCompact ? 16 : 18, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: isCompact ? 28 : 32, height: isCompact ? 28 : 32)
-                        .padding(isCompact ? 6 : 10)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .glassBackground(.regular, in: .circle, fallback: .thinMaterial)
-                .shadow(color: .black.opacity(0.1), radius: 8, y: 2)
-                .contentShape(Circle())
-                .transition(.scale.combined(with: .opacity))
-            } else if shouldShowPlayerPill {
-                Color.clear
-                    .frame(width: scrollButtonWidth, height: scrollButtonWidth)
-            }
-        }
-    }
-    #endif
 }
 
 // MARK: - Player Sheet Modifiers
@@ -609,15 +510,11 @@ private extension View {
     @ViewBuilder
     func applyPlayerSheets(
         showingQualitySheet: Binding<Bool>,
-        showingPlaylistSheet: Binding<Bool>,
-        showingDownloadSheet: Binding<Bool>,
         showingDeleteDownloadAlert: Binding<Bool>,
         onStreamSelected: @escaping (Stream, Stream?) -> Void
     ) -> some View {
         modifier(PlayerSheetsModifier(
             showingQualitySheet: showingQualitySheet,
-            showingPlaylistSheet: showingPlaylistSheet,
-            showingDownloadSheet: showingDownloadSheet,
             showingDeleteDownloadAlert: showingDeleteDownloadAlert,
             onStreamSelected: onStreamSelected
         ))
@@ -628,8 +525,6 @@ private extension View {
 private struct PlayerSheetsModifier: ViewModifier {
     @Environment(\.appEnvironment) var appEnvironment
     @Binding var showingQualitySheet: Bool
-    @Binding var showingPlaylistSheet: Bool
-    @Binding var showingDownloadSheet: Bool
     @Binding var showingDeleteDownloadAlert: Bool
     let onStreamSelected: (Stream, Stream?) -> Void
 
@@ -642,15 +537,7 @@ private struct PlayerSheetsModifier: ViewModifier {
             .sheet(isPresented: $showingQualitySheet) {
                 qualitySelectorSheet
             }
-            .sheet(isPresented: $showingPlaylistSheet) {
-                if let video = playerState?.currentVideo {
-                    PlaylistSelectorSheet(video: video)
-                }
-            }
             #if !os(tvOS)
-            .sheet(isPresented: $showingDownloadSheet) {
-                downloadSheet
-            }
             .alert(
                 String(localized: "player.deleteDownload.title"),
                 isPresented: $showingDeleteDownloadAlert
@@ -741,19 +628,6 @@ private struct PlayerSheetsModifier: ViewModifier {
         }
     }
 
-    #if !os(tvOS)
-    @ViewBuilder
-    private var downloadSheet: some View {
-        if let video = playerState?.currentVideo, let playerService {
-            DownloadQualitySheet(
-                video: video,
-                streams: playerService.availableStreams,
-                captions: playerService.availableCaptions,
-                dislikeCount: playerState?.dislikeCount
-            )
-        }
-    }
-    #endif
 }
 
 // MARK: - Player Event Handlers Modifier
@@ -765,13 +639,14 @@ private struct PlayerEventHandlersModifier: ViewModifier {
     @Binding var scrollPosition: ScrollPosition
     @Binding var isPanelExpanded: Bool
     @Binding var panelExpandOffset: CGFloat
-    @Binding var showOriginalTitle: Bool
     @Binding var isThumbnailFrozen: Bool
     @Binding var displayedThumbnailURL: URL?
     @Binding var displayedThumbnailImage: Image?
     @Binding var isAutoplayCancelled: Bool
     @Binding var pendingScrollToTopOnHeightChange: Bool
     @Binding var playerControlsLayout: PlayerControlsLayout
+    @Binding var isPortraitPanelVisible: Bool
+    let isInWideScreenLayout: Bool
 
     let stopAutoplayCountdown: () -> Void
     let startAutoplayCountdown: () -> Void
@@ -835,7 +710,6 @@ private struct PlayerEventHandlersModifier: ViewModifier {
             isPanelExpanded = false
             panelExpandOffset = 0
         }
-        showOriginalTitle = false
         stopAutoplayCountdown()
         isAutoplayCancelled = false
 
@@ -886,10 +760,55 @@ private struct PlayerEventHandlersModifier: ViewModifier {
         if let service = appEnvironment?.playerControlsLayoutService {
             let layout = await service.activeLayout()
             playerControlsLayout = layout
+            PlayerControlsLayout.cached = layout
             GlobalLayoutSettings.cached = layout.globalSettings
             MiniPlayerSettings.cached = layout.effectiveMiniPlayerSettings
+            PanelSettings.cached = layout.effectivePanelSettings
+
+            // Apply the preset's default panel visibility once per expanded
+            // player session, now that the authoritative settings are loaded.
+            if navigationCoordinator?.hasAppliedPanelDefaultVisibility != true {
+                let visible = applyPanelDefaultVisibility(
+                    layout.effectivePanelSettings,
+                    cornerLayoutFits: navigationCoordinator?.cornerLayoutFits ?? PanelSettings.canHostCornerLayout,
+                    settingsManager: appEnvironment?.settingsManager
+                )
+                #if os(iOS) || os(macOS)
+                LoggingService.shared.logPlayer("[ExpandedPlayerSheet] authoritative apply: visible=\(visible), state=\(isPortraitPanelVisible), wideScreen=\(isInWideScreenLayout)")
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    isPortraitPanelVisible = visible
+                }
+                if !isInWideScreenLayout {
+                    navigationCoordinator?.isPortraitPanelVisible = visible
+                }
+                #endif
+                navigationCoordinator?.hasAppliedPanelDefaultVisibility = true
+            }
         }
     }
+}
+
+/// Applies the preset's default details panel visibility for a fresh
+/// panel mount. The landscape default is written straight to the
+/// persisted landscape state (the wide layouts read it); the portrait
+/// default is returned so callers can mirror it into the portrait panel
+/// state, which lives in view @State rather than settings.
+@MainActor
+@discardableResult
+private func applyPanelDefaultVisibility(
+    _ settings: PanelSettings,
+    cornerLayoutFits: Bool,
+    settingsManager: SettingsManager?
+) -> Bool {
+    guard let settingsManager else { return true }
+    settingsManager.landscapeDetailsPanelVisible = settings
+        .effectiveDefaultVisibility(for: .landscape, cornerLayoutFits: cornerLayoutFits)
+        .resolve(lastVisible: settingsManager.landscapeDetailsPanelLastVisible)
+    return settings
+        .effectiveDefaultVisibility(for: .portrait)
+        .resolve(lastVisible: settingsManager.portraitDetailsPanelLastVisible)
 }
 
 // MARK: - iOS Event Handlers Modifier
@@ -957,6 +876,13 @@ private struct PlayerMacOSEventHandlersModifier: ViewModifier {
 
     var playerState: PlayerState? { appEnvironment?.playerService.state }
 
+    /// Corner layout with its panels visible resizes the window freely: no
+    /// aspect lock, no auto-fit. With the panels hidden only the video is
+    /// left, so the window follows the ratio lock like the stacked layout.
+    private var isCornerLayoutActive: Bool {
+        appEnvironment?.isCornerPanelLayoutActive == true
+    }
+
     func body(content: Content) -> some View {
         content
             .onChange(of: playerState?.showDebugOverlay) { _, isVisible in
@@ -972,12 +898,38 @@ private struct PlayerMacOSEventHandlersModifier: ViewModifier {
             .onChange(of: playerState?.currentVideo?.id) { oldValue, newValue in
                 handleVideoChangeForResize(oldValue: oldValue, newValue: newValue)
             }
+            .onChange(of: appEnvironment?.isCornerPanelLayoutActive) { _, isCorner in
+                handleCornerLayoutChange(isCorner: isCorner == true)
+            }
             .onAppear {
                 handleMacOSAppear()
             }
     }
 
+    /// Entering corner mode with panels shown drops the window's aspect-ratio
+    /// constraint so it resizes freely; leaving it (stacked layout, or corner
+    /// panels hidden) restores the lock (and auto-fit, when on) exactly as the
+    /// aspect-change handler would have applied it.
+    private func handleCornerLayoutChange(isCorner: Bool) {
+        if isCorner {
+            ExpandedPlayerWindowManager.shared.unlockAspectRatio()
+        } else if let aspectRatio = playerState?.videoAspectRatio, aspectRatio > 0 {
+            ExpandedPlayerWindowManager.shared.lockAspectRatio(aspectRatio)
+            // Auto-fit only when the layout change was not caused by the
+            // user dragging the window. The corner layout resolves from the
+            // window width, so a drag across its threshold flips this handler;
+            // fitting back to the video size mid-drag pushes the width over
+            // the threshold again and the window oscillates between layouts
+            // for the rest of the drag. The user's drag owns the size.
+            if appEnvironment?.settingsManager.playerSheetAutoResize == true,
+               !ExpandedPlayerWindowManager.shared.isLiveResizing {
+                ExpandedPlayerWindowManager.shared.resizeToFitAspectRatio(aspectRatio, animated: true)
+            }
+        }
+    }
+
     private func handleAspectRatioChange(oldValue: Double?, newValue: Double?) {
+        guard !isCornerLayoutActive else { return }
         // nil while a video is loaded means audio-only playback (no video
         // track reports a size) — fall back to the standard 16:9 instead of
         // keeping the previous video's ratio.
@@ -1008,6 +960,7 @@ private struct PlayerMacOSEventHandlersModifier: ViewModifier {
     }
 
     private func handleVideoChangeForResize(oldValue: Video.ID?, newValue: Video.ID?) {
+        guard !isCornerLayoutActive else { return }
         guard oldValue != nil, newValue != nil else { return }
         guard appEnvironment?.settingsManager.playerSheetAutoResize == true else { return }
 
@@ -1023,6 +976,7 @@ private struct PlayerMacOSEventHandlersModifier: ViewModifier {
     }
 
     private func handleMacOSAppear() {
+        guard !isCornerLayoutActive else { return }
         guard let aspectRatio = playerState?.videoAspectRatio, aspectRatio > 0 else { return }
 
         // Lock aspect ratio for manual resize unconditionally.

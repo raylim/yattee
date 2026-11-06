@@ -126,6 +126,11 @@ extension SettingsManager {
     /// dynamic platform color that resolves per trait environment, so all consumers
     /// (root tint and direct readers) adapt to light/dark automatically.
     var resolvedAccentColor: Color {
+        #if os(tvOS)
+        // tvOS keeps the system default accent; user-picked colors (possibly
+        // synced from iOS via iCloud) must never override it.
+        return .accentColor
+        #else
         let light = resolvedLightAccentColor
         guard useSeparateDarkAccentColor else { return light }
         let dark = resolvedDarkAccentColor
@@ -138,6 +143,7 @@ extension SettingsManager {
         return Color(uiColor: UIColor { traits in
             UIColor(traits.userInterfaceStyle == .dark ? dark : light)
         })
+        #endif
         #endif
     }
 
@@ -220,6 +226,21 @@ extension SettingsManager {
         }
     }
 
+    /// Whether the account switcher is offered outside Settings — the toolbar
+    /// menus, the tvOS buttons, the macOS sidebar row. The switcher on the
+    /// accounts settings screen stays regardless: it is where this is turned
+    /// back on. Default is true (visible).
+    var showAccountPickers: Bool {
+        get {
+            if let cached = _showAccountPickers { return cached }
+            return bool(for: .showAccountPickers, default: true)
+        }
+        set {
+            _showAccountPickers = newValue
+            set(newValue, for: .showAccountPickers)
+        }
+    }
+
     // MARK: - Feed Settings
 
     /// Feed cache validity duration in minutes. Default is 30 minutes.
@@ -242,11 +263,6 @@ extension SettingsManager {
     }
 
     // MARK: - Custom User-Agent
-
-    /// Generates a new random User-Agent string.
-    static func generateRandomUserAgent() -> String {
-        UserAgentGenerator.generateRandom()
-    }
 
     /// Returns the current effective User-Agent string.
     /// If randomize per request is enabled, generates a new random UA.
@@ -350,35 +366,6 @@ extension SettingsManager {
             let clamped = max(1, min(15, newValue))
             _queueAutoPlayCountdown = clamped
             localDefaults.set(clamped, forKey: "queueAutoPlayCountdown")
-        }
-    }
-
-    // MARK: - Subscription Account Settings
-
-    /// The subscription account storage key.
-    private static let subscriptionAccountKey = "subscriptionAccount"
-
-    /// The active subscription account configuration.
-    /// Determines where subscriptions are stored and fetched from.
-    /// Defaults to local (iCloud) if not set.
-    var subscriptionAccount: SubscriptionAccount {
-        get {
-            if let cached = _subscriptionAccount { return cached }
-            guard let data = localDefaults.data(forKey: Self.subscriptionAccountKey),
-                  let account = try? JSONDecoder().decode(SubscriptionAccount.self, from: data) else {
-                return .local
-            }
-            return account
-        }
-        set {
-            _subscriptionAccount = newValue
-            if let data = try? JSONEncoder().encode(newValue) {
-                localDefaults.set(data, forKey: Self.subscriptionAccountKey)
-                // Sync to iCloud if enabled
-                if iCloudSyncEnabled && syncSettings {
-                    ubiquitousStore.set(data, forKey: Self.subscriptionAccountKey)
-                }
-            }
         }
     }
 
@@ -594,6 +581,27 @@ extension SettingsManager {
         }
     }
 
+    // MARK: - Sharing Settings
+
+    /// Whether share links to YouTube videos point at the active instance's
+    /// web watch page instead of youtube.com. Default is true.
+    /// Videos the active instance can't serve keep their original URL.
+    /// This is a local-only setting (not synced to iCloud).
+    var privacyFrontendSharingEnabled: Bool {
+        get {
+            if let cached = _privacyFrontendSharingEnabled { return cached }
+            // Default to true if not set
+            if localDefaults.object(forKey: "privacyFrontendSharingEnabled") == nil {
+                return true
+            }
+            return localDefaults.bool(forKey: "privacyFrontendSharingEnabled")
+        }
+        set {
+            _privacyFrontendSharingEnabled = newValue
+            localDefaults.set(newValue, forKey: "privacyFrontendSharingEnabled")
+        }
+    }
+
     // MARK: - Link Action Settings
 
     /// Default action when opening links from share extension or URL schemes.
@@ -611,6 +619,20 @@ extension SettingsManager {
         set {
             _defaultLinkAction = newValue
             localDefaults.set(newValue.rawValue, forKey: "defaultLinkAction")
+        }
+    }
+
+    /// Whether URL scheme actions that change saved state (queue, bookmark,
+    /// download, subscribe) run without asking first. Off by default: any web
+    /// page can open a yattee:// link. Local-only, like `defaultLinkAction`.
+    var linkActionsRunWithoutConfirmation: Bool {
+        get {
+            if let cached = _linkActionsRunWithoutConfirmation { return cached }
+            return localDefaults.bool(forKey: "linkActionsRunWithoutConfirmation")
+        }
+        set {
+            _linkActionsRunWithoutConfirmation = newValue
+            localDefaults.set(newValue, forKey: "linkActionsRunWithoutConfirmation")
         }
     }
 
@@ -646,6 +668,39 @@ extension SettingsManager {
         set {
             _textAreaTapAction = newValue
             localDefaults.set(newValue.rawValue, forKey: "textAreaTapAction")
+        }
+    }
+
+    /// Where the video info view shows its actions. Default is the toolbar.
+    var videoInfoActionsLayout: VideoInfoActionsLayout {
+        get {
+            if let cached = _videoInfoActionsLayout { return cached }
+            guard let rawValue = localDefaults.string(forKey: "videoInfoActionsLayout"),
+                  let layout = VideoInfoActionsLayout(rawValue: rawValue) else {
+                return .toolbar
+            }
+            return layout
+        }
+        set {
+            _videoInfoActionsLayout = newValue
+            localDefaults.set(newValue.rawValue, forKey: "videoInfoActionsLayout")
+        }
+    }
+
+    /// Action pinned to the video info toolbar (toolbar layout only). Default is download
+    /// because the hero thumbnail already plays on tap.
+    var videoInfoPrimaryAction: VideoInfoPrimaryAction {
+        get {
+            if let cached = _videoInfoPrimaryAction { return cached }
+            guard let rawValue = localDefaults.string(forKey: "videoInfoPrimaryAction"),
+                  let action = VideoInfoPrimaryAction(rawValue: rawValue) else {
+                return .download
+            }
+            return action
+        }
+        set {
+            _videoInfoPrimaryAction = newValue
+            localDefaults.set(newValue.rawValue, forKey: "videoInfoPrimaryAction")
         }
     }
     #endif

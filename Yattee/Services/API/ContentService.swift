@@ -8,25 +8,7 @@
 import Foundation
 
 /// Protocol defining the common content fetching interface.
-protocol ContentServiceProtocol: Sendable {
-    func trending(for instance: Instance) async throws -> [Video]
-    func popular(for instance: Instance) async throws -> [Video]
-    func feed(for instance: Instance, credential: String) async throws -> [Video]
-    func subscriptions(for instance: Instance, credential: String) async throws -> [Channel]
-    func search(query: String, instance: Instance, page: Int, filters: SearchFilters) async throws -> SearchResult
-    func searchSuggestions(query: String, instance: Instance) async throws -> [String]
-    func video(id: String, instance: Instance) async throws -> Video
-    func channel(id: String, instance: Instance) async throws -> Channel
-    func channelVideos(id: String, instance: Instance, continuation: String?) async throws -> ChannelVideosPage
-    func channelPlaylists(id: String, instance: Instance, continuation: String?) async throws -> ChannelPlaylistsPage
-    func channelShorts(id: String, instance: Instance, continuation: String?) async throws -> ChannelVideosPage
-    func channelStreams(id: String, instance: Instance, continuation: String?) async throws -> ChannelVideosPage
-    func playlist(id: String, instance: Instance) async throws -> Playlist
-    func comments(videoID: String, instance: Instance, continuation: String?) async throws -> CommentsPage
-    func streams(videoID: String, instance: Instance) async throws -> [Stream]
-    func captions(videoID: String, instance: Instance) async throws -> [Caption]
-    func channelSearch(id: String, query: String, instance: Instance, page: Int) async throws -> ChannelSearchPage
-}
+protocol ContentServiceProtocol: Sendable {}
 
 /// Unified content service that routes requests to the appropriate API based on instance type.
 actor ContentService: ContentServiceProtocol {
@@ -52,17 +34,6 @@ actor ContentService: ContentServiceProtocol {
         self.defaultPipedAPI = PipedAPI(httpClient: httpClient)
         self.defaultPeerTubeAPI = PeerTubeAPI(httpClient: httpClient)
         self.defaultYatteeServerAPI = YatteeServerAPI(httpClient: httpClient)
-        self.basicAuthCredentialsManager = basicAuthCredentialsManager
-    }
-
-    init(httpClientFactory: HTTPClientFactory, basicAuthCredentialsManager: BasicAuthCredentialsManager? = nil) {
-        self.httpClientFactory = httpClientFactory
-        // Create default client for instances that don't need insecure SSL
-        self.defaultHTTPClient = httpClientFactory.createClient(allowInvalidCertificates: false)
-        self.defaultInvidiousAPI = InvidiousAPI(httpClient: defaultHTTPClient)
-        self.defaultPipedAPI = PipedAPI(httpClient: defaultHTTPClient)
-        self.defaultPeerTubeAPI = PeerTubeAPI(httpClient: defaultHTTPClient)
-        self.defaultYatteeServerAPI = YatteeServerAPI(httpClient: defaultHTTPClient)
         self.basicAuthCredentialsManager = basicAuthCredentialsManager
     }
 
@@ -172,6 +143,31 @@ actor ContentService: ContentServiceProtocol {
         }
     }
 
+    /// Fetches one page of the credential owner's feed.
+    ///
+    /// Separate from the unpaged `feed(for:credential:)` because only Invidious
+    /// has pages at all: Piped answers with the whole feed however it is asked,
+    /// which is why it always reports there is no more to come.
+    func feed(for instance: Instance, credential: String, page: Int) async throws -> FeedPage {
+        switch instance.type {
+        case .invidious:
+            let response = try await invidiousAPI(for: instance).feed(
+                instance: instance,
+                sid: credential,
+                page: page
+            )
+            return FeedPage(videos: response.videos, hasMore: response.hasMore)
+        case .piped:
+            let videos = try await pipedAPI(for: instance).feed(
+                instance: instance,
+                authToken: credential
+            )
+            return FeedPage(videos: videos, hasMore: false)
+        default:
+            throw APIError.notSupported
+        }
+    }
+
     func subscriptions(for instance: Instance, credential: String) async throws -> [Channel] {
         switch instance.type {
         case .invidious:
@@ -231,10 +227,6 @@ actor ContentService: ContentServiceProtocol {
         try await api(for: instance).comments(videoID: videoID, instance: instance, continuation: continuation)
     }
 
-    func streams(videoID: String, instance: Instance) async throws -> [Stream] {
-        try await api(for: instance).streams(videoID: videoID, instance: instance)
-    }
-
     func captions(videoID: String, instance: Instance) async throws -> [Caption] {
         try await api(for: instance).captions(videoID: videoID, instance: instance)
     }
@@ -243,15 +235,326 @@ actor ContentService: ContentServiceProtocol {
         try await api(for: instance).channelSearch(id: id, query: query, instance: instance, page: page)
     }
 
-    /// Fetches streams with proxy URLs for downloads (Yattee Server: hits /proxy/fast/
-    /// so the server caches the file on disk; other backends apply Invidious URL rewriting).
-    func proxyStreams(videoID: String, instance: Instance) async throws -> [Stream] {
-        if instance.type == .yatteeServer {
-            return try await yatteeServerAPI(for: instance)
-                .proxyStreams(videoID: videoID, instance: instance, mode: .download)
+    // MARK: - Authenticated Playlists
+
+    /// Fetches the playlists the credential's owner has on the instance.
+    func userPlaylists(instance: Instance, credential: String) async throws -> [Playlist] {
+        switch instance.type {
+        case .invidious:
+            return try await invidiousAPI(for: instance).userPlaylists(instance: instance, sid: credential)
+        case .piped:
+            return try await pipedAPI(for: instance).userPlaylists(instance: instance, authToken: credential)
+        default:
+            throw APIError.notSupported
         }
-        let fetchedStreams = try await streams(videoID: videoID, instance: instance)
-        return await InvidiousAPI.proxyStreamsIfNeeded(fetchedStreams, instance: instance)
+    }
+
+    /// Fetches one of the credential owner's playlists along with the per-entry
+    /// identities its rows can be removed by.
+    func userPlaylistSnapshot(
+        id: String,
+        instance: Instance,
+        credential: String
+    ) async throws -> RemotePlaylistSnapshot {
+        switch instance.type {
+        case .invidious:
+            return try await invidiousAPI(for: instance).userPlaylistSnapshot(
+                id: id,
+                instance: instance,
+                sid: credential
+            )
+        case .piped:
+            return try await pipedAPI(for: instance).userPlaylistSnapshot(
+                id: id,
+                instance: instance,
+                authToken: credential
+            )
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Creates a playlist for the credential's owner. **One request.**
+    ///
+    /// Neither backend takes a description when creating, so this does not take
+    /// one either: setting it is a separate write, sequenced by the caller with
+    /// a credential recheck in between.
+    ///
+    /// The returned playlist is the little the server says about what it just
+    /// made — an id and a title. Nothing else is invented here: callers refetch
+    /// the list, which is the only description that is actually the server's.
+    /// - Parameters:
+    ///   - privacy: Ignored by backends without a visibility concept (Piped),
+    ///     and defaulted to private on those that have one when not given —
+    ///     Invidious rejects a creation that carries no visibility at all.
+    func createPlaylist(
+        title: String,
+        privacy: PlaylistPrivacy?,
+        instance: Instance,
+        credential: String
+    ) async throws -> Playlist {
+        switch instance.type {
+        case .invidious:
+            return try await invidiousAPI(for: instance).createPlaylist(
+                title: title,
+                privacy: privacy ?? .private,
+                instance: instance,
+                sid: credential
+            )
+
+        case .piped:
+            let playlistID = try await pipedAPI(for: instance).createPlaylist(
+                name: title,
+                instance: instance,
+                authToken: credential
+            )
+            return Playlist(id: .global(playlistID), title: title)
+
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Renames one of the credential owner's playlists. **One request.**
+    ///
+    /// - Parameter privacy: the visibility to store, or `nil` to leave whatever
+    ///   the playlist has. Ignored on backends without a visibility concept.
+    func renamePlaylist(
+        id: String,
+        title: String,
+        privacy: PlaylistPrivacy?,
+        instance: Instance,
+        credential: String
+    ) async throws {
+        switch instance.type {
+        case .invidious:
+            try await invidiousAPI(for: instance).updatePlaylist(
+                id: id,
+                title: title,
+                description: nil,
+                privacy: privacy,
+                instance: instance,
+                sid: credential
+            )
+
+        case .piped:
+            try await pipedAPI(for: instance).renamePlaylist(
+                id: id,
+                newName: title,
+                instance: instance,
+                authToken: credential
+            )
+
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Stores a playlist's description. **One request.**
+    ///
+    /// - Parameter title: the playlist's title, resent unchanged. Invidious
+    ///   edits every attribute through one endpoint and refuses a body without
+    ///   a title; Piped has a description endpoint of its own and ignores this.
+    func setPlaylistDescription(
+        id: String,
+        description: String,
+        title: String,
+        instance: Instance,
+        credential: String
+    ) async throws {
+        switch instance.type {
+        case .invidious:
+            try await invidiousAPI(for: instance).updatePlaylist(
+                id: id,
+                title: title,
+                description: description,
+                privacy: nil,
+                instance: instance,
+                sid: credential
+            )
+
+        case .piped:
+            try await pipedAPI(for: instance).updatePlaylistDescription(
+                id: id,
+                description: description,
+                instance: instance,
+                authToken: credential
+            )
+
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Deletes one of the credential owner's playlists.
+    func deletePlaylist(id: String, instance: Instance, credential: String) async throws {
+        switch instance.type {
+        case .invidious:
+            try await invidiousAPI(for: instance).deletePlaylist(id: id, instance: instance, sid: credential)
+        case .piped:
+            try await pipedAPI(for: instance).deletePlaylist(id: id, instance: instance, authToken: credential)
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Appends a video to one of the credential owner's playlists.
+    func addVideoToPlaylist(
+        playlistID: String,
+        videoID: String,
+        instance: Instance,
+        credential: String
+    ) async throws {
+        switch instance.type {
+        case .invidious:
+            try await invidiousAPI(for: instance).addVideoToPlaylist(
+                playlistID: playlistID,
+                videoID: videoID,
+                instance: instance,
+                sid: credential
+            )
+        case .piped:
+            try await pipedAPI(for: instance).addToPlaylist(
+                id: playlistID,
+                videoID: videoID,
+                instance: instance,
+                authToken: credential
+            )
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Removes one row from one of the credential owner's playlists.
+    ///
+    /// The entry id says which backend minted it, and it has to be the one this
+    /// instance runs: an Invidious `indexId` means nothing to Piped, and a
+    /// Piped position sent to Invidious would be a *different row* rather than
+    /// an error, so a mismatch is refused rather than translated.
+    func removeEntry(
+        _ entryID: RemotePlaylistEntryID,
+        instance: Instance,
+        credential: String
+    ) async throws {
+        switch (entryID, instance.type) {
+        case (.invidious(let playlistID, let indexID), .invidious):
+            try await invidiousAPI(for: instance).removeVideoFromPlaylist(
+                playlistID: playlistID,
+                indexID: indexID,
+                instance: instance,
+                sid: credential
+            )
+
+        case (.piped(let playlistID, let position), .piped):
+            try await pipedAPI(for: instance).removeFromPlaylist(
+                id: playlistID,
+                index: position,
+                instance: instance,
+                authToken: credential
+            )
+
+        case (_, .invidious), (_, .piped):
+            throw APIError.invalidRequest
+
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    // MARK: - Watch History
+
+    /// One page of the credential owner's server-side watch history.
+    ///
+    /// Invidious is the only backend with a history endpoint at all; the
+    /// capability gate above this refuses the others long before here.
+    func watchHistory(
+        instance: Instance,
+        credential: String,
+        page: Int,
+        maxResults: Int
+    ) async throws -> [String] {
+        switch instance.type {
+        case .invidious:
+            return try await invidiousAPI(for: instance).watchHistory(
+                instance: instance,
+                sid: credential,
+                page: page,
+                maxResults: maxResults
+            )
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Records a video as watched in the credential owner's history.
+    func markWatched(videoID: String, instance: Instance, credential: String) async throws {
+        switch instance.type {
+        case .invidious:
+            try await invidiousAPI(for: instance).markWatched(
+                videoID: videoID,
+                instance: instance,
+                sid: credential
+            )
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    /// Removes one video from the credential owner's history.
+    func removeWatched(videoID: String, instance: Instance, credential: String) async throws {
+        switch instance.type {
+        case .invidious:
+            try await invidiousAPI(for: instance).removeWatched(
+                videoID: videoID,
+                instance: instance,
+                sid: credential
+            )
+        default:
+            throw APIError.notSupported
+        }
+    }
+
+    // MARK: - Authentication
+
+    /// Signs in to an instance and returns the credential its backend issues —
+    /// a session id for Invidious, an auth token for Piped.
+    ///
+    /// Routed through here so a login carries the same per-instance
+    /// configuration every other request does: the reverse-proxy basic auth, the
+    /// certificate policy, and the User-Agent some instances insist on. A login
+    /// that skipped any of them would fail before reaching the login endpoint.
+    func login(username: String, password: String, instance: Instance) async throws -> String {
+        switch instance.type {
+        case .invidious:
+            // Invidious' login POST runs on its own ephemeral URLSession so it
+            // can read the Set-Cookie the SID arrives in, and therefore inherits
+            // nothing from the client's default headers. An instance behind a
+            // basic-auth proxy needs that header handed over explicitly, or the
+            // proxy answers 401 before the upstream ever sees the credentials.
+            var extraHeaders: [String: String]?
+            if let basicAuthHeader = await basicAuthCredentialsManager?.basicAuthHeader(for: instance) {
+                extraHeaders = ["Authorization": basicAuthHeader]
+            }
+            return try await invidiousAPI(for: instance).login(
+                email: username,
+                password: password,
+                instance: instance,
+                extraHeaders: extraHeaders
+            )
+        case .piped:
+            // Piped's login goes through the HTTPClient, so the per-instance
+            // client already carries the proxy header in its default headers.
+            return try await pipedAPI(for: instance).login(
+                username: username,
+                password: password,
+                instance: instance
+            )
+        default:
+            // Routing, not policy: whether a backend has accounts to sign in to
+            // is `InstanceType.accountCapabilities.supportsAccounts`, and a case
+            // belongs here the moment that row turns true.
+            throw APIError.notSupported
+        }
     }
 
     /// Fetches video details + streams for downloads. For Yattee Server this routes
@@ -329,8 +632,24 @@ actor ContentService: ContentServiceProtocol {
         guard instance.type == .yatteeServer else {
             throw APIError.notSupported
         }
-        return try await yatteeServerAPI(for: instance).extractURL(url, instance: instance)
+        // Keyed by link only: callers pick the Yattee Server differently, and
+        // any server returns equivalent streams within the TTL.
+        let key = url.absoluteString
+        if let cached = recentExtractions[key], Date().timeIntervalSince(cached.date) < Self.extractionCacheTTL {
+            return cached.result
+        }
+        let result = try await yatteeServerAPI(for: instance).extractURL(url, instance: instance)
+        recentExtractions = recentExtractions.filter { Date().timeIntervalSince($0.value.date) < Self.extractionCacheTTL }
+        recentExtractions[key] = (result, Date())
+        return result
     }
+
+    /// How long an extraction is reused. A link opened from Open Link is
+    /// extracted to show its details page, which re-extracts for full details,
+    /// and Play extracts again; all three share one Yattee Server request.
+    /// Short, so a retry after a failed stream soon fetches fresh URLs.
+    private static let extractionCacheTTL: TimeInterval = 60
+    private var recentExtractions: [String: (result: (video: Video, streams: [Stream], captions: [Caption]), date: Date)] = [:]
 
     /// Extracts channel/user videos from any URL that yt-dlp supports.
     /// Requires a Yattee Server instance.
@@ -360,6 +679,22 @@ actor ContentService: ContentServiceProtocol {
         }
         return try await yatteeServerAPI(for: instance).fetchServerInfo(for: instance)
     }
+}
+
+/// The real transport behind ``AccountService``. Declared here rather than on
+/// the protocol's own file so the conformance is checked next to the methods
+/// that satisfy it; the protocol exists so tests can script a server.
+extension ContentService: RemotePlaylistTransport {}
+
+extension ContentService: WatchHistoryTransport {}
+
+// MARK: - Feed Page
+
+/// One page of an authenticated feed, with whatever the backend says about
+/// there being another.
+struct FeedPage: Sendable {
+    let videos: [Video]
+    let hasMore: Bool
 }
 
 // MARK: - Search Result

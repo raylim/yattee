@@ -27,9 +27,20 @@ final class ExpandedPlayerWindowManager: NSObject {
     /// whether the window was already fullscreen before the overlay began (so
     /// collapsing doesn't exit a fullscreen the user had independently).
     private weak var overlayParent: NSWindow?
-    private var overlayFullScreenObservers: [NSObjectProtocol] = []
+    private var overlayWindowObservers: [NSObjectProtocol] = []
     private var overlayToolbarWasVisible: Bool?
     private var overlayWasFullScreenAtBegin = false
+    private var isOverlayParentEnteringFullScreen = false
+
+    /// The main window belongs to the app rather than the player. Preserve its
+    /// normal sizing rules while the inline overlay temporarily owns resizing.
+    private struct WindowSizingConstraints {
+        let contentAspectRatio: NSSize
+        let contentResizeIncrements: NSSize
+        let contentMinSize: NSSize
+        let minSize: NSSize
+    }
+    private var overlaySizingConstraints: WindowSizingConstraints?
 
     /// Window hosting ContentView, registered by `MainContentWindowReader`.
     /// `beginInlineOverlay` must not guess via mainWindow/keyWindow: when the
@@ -56,8 +67,26 @@ final class ExpandedPlayerWindowManager: NSObject {
     /// is parked here and replayed in `windowDidExitFullScreen`.
     private var pendingFullScreenAspectRatio: Double?
 
-    private var isPlayerWindowFullScreen: Bool {
-        playerWindow?.styleMask.contains(.fullScreen) ?? false
+    /// True between `windowWillEnterFullScreen` and `windowDidEnterFullScreen`
+    /// on the separate player window. The style mask may not carry
+    /// `.fullScreen` yet at will-enter time, and the corner panels hide right
+    /// then (which re-locks the aspect ratio) — the lock must park instead of
+    /// touching a window mid-transition.
+    private var isPlayerWindowEnteringFullScreen = false
+
+    /// Corner layout panels hidden by entering native fullscreen so the video
+    /// alone fills the screen; restored when fullscreen ends.
+    private var cornerPanelsHiddenForFullScreen = false
+
+    private var activePlayerWindow: NSWindow? {
+        playerWindow ?? overlayParent
+    }
+
+    private var isActivePlayerWindowFullScreen: Bool {
+        if let playerWindow {
+            return isPlayerWindowEnteringFullScreen || playerWindow.styleMask.contains(.fullScreen)
+        }
+        return isOverlayParentEnteringFullScreen || (overlayParent?.styleMask.contains(.fullScreen) ?? false)
     }
 
     // Configuration
@@ -67,6 +96,19 @@ final class ExpandedPlayerWindowManager: NSObject {
     private static let targetVideoHeight: CGFloat = 720
     private static let defaultAspectRatio: Double = 16.0 / 9.0
     private static let frameAutosaveName = "ExpandedPlayerWindow"
+
+    /// Aspect-lock change requested while the user is dragging the window.
+    /// Changing `contentAspectRatio`/`contentResizeIncrements` mid-drag makes
+    /// AppKit's resize handler switch modes under the cursor and snap the
+    /// frame, so the change is parked here and applied in
+    /// `windowDidEndLiveResize`. The last request wins.
+    private enum PendingAspectLock { case lock(Double), unlock }
+    private var pendingLiveResizeAspectLock: PendingAspectLock?
+
+    /// Whether the user is currently dragging the active player host window.
+    var isLiveResizing: Bool {
+        activePlayerWindow?.inLiveResize == true
+    }
 
     var isPresented: Bool {
         playerWindow != nil
@@ -176,7 +218,12 @@ final class ExpandedPlayerWindowManager: NSObject {
 
         // Lock manual resize to the video aspect ratio. Seeded with the real ratio
         // when known (else 16:9); updated as soon as the real ratio is known.
-        Self.applyAspectRatioConstraint(seedAspect, to: window)
+        // Corner layout with its panels visible (already active on a window
+        // re-mount, e.g. switching from the inline overlay) keeps the window
+        // unconstrained.
+        if !appEnvironment.isCornerPanelLayoutActive {
+            Self.applyAspectRatioConstraint(seedAspect, to: window)
+        }
 
         // Force the intended size. Assigning `contentViewController` above resizes
         // the window to the hosting controller's fitting size — and the lightweight
@@ -364,6 +411,35 @@ final class ExpandedPlayerWindowManager: NSObject {
 
     /// Toggles native fullscreen on the player window.
     func toggleFullScreen() {
+        guard let target = playerWindow ?? overlayParent else { return }
+
+        // Entering fullscreen from the corner layout: hide the panels first
+        // (the video grows over them inside the current window), and only
+        // then run the fullscreen zoom — the reverse order zooms the whole
+        // video-plus-panels arrangement and then reflows it on screen. The
+        // entering flag is raised now so the aspect re-lock the panel hide
+        // triggers parks instead of auto-fitting the window mid-way.
+        if !target.styleMask.contains(.fullScreen) {
+            if playerWindow != nil {
+                isPlayerWindowEnteringFullScreen = true
+            } else {
+                isOverlayParentEnteringFullScreen = true
+            }
+            if hideCornerPanelsForFullScreen() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.cornerPanelHideDuration) { [weak self] in
+                    self?.performNativeFullScreenToggle()
+                }
+                return
+            }
+        }
+        performNativeFullScreenToggle()
+    }
+
+    /// Time the corner layout takes to animate its panels away (its
+    /// `.easeInOut(duration: 0.25)` plus a beat for the last frame).
+    private static var cornerPanelHideDuration: TimeInterval { 0.3 }
+
+    private func performNativeFullScreenToggle() {
         guard let window = playerWindow else {
             // Inline overlay presentation: the player already fills the main
             // window, so fullscreen is just the window's native toggle. The
@@ -398,13 +474,30 @@ final class ExpandedPlayerWindowManager: NSObject {
 
         LoggingService.shared.debug("ExpandedPlayerWindowManager: beginning inline overlay", category: .player)
         overlayParent = parent
+        overlaySizingConstraints = WindowSizingConstraints(
+            contentAspectRatio: parent.contentAspectRatio,
+            contentResizeIncrements: parent.contentResizeIncrements,
+            contentMinSize: parent.contentMinSize,
+            minSize: parent.minSize
+        )
         overlayToolbarWasVisible = parent.toolbar?.isVisible
         parent.toolbar?.isVisible = false
         overlayWasFullScreenAtBegin = parent.styleMask.contains(.fullScreen)
+        isOverlayParentEnteringFullScreen = false
+        hasCompletedInitialSizing = false
+        pendingFullScreenAspectRatio = nil
+        pendingLiveResizeAspectLock = nil
 
         let coordinator = AppEnvironment.shared.navigationCoordinator
         coordinator.isMacInlinePlayerFullScreen = overlayWasFullScreenAtBegin
-        observeOverlayFullScreenTransitions(of: parent)
+        observeOverlayWindowTransitions(of: parent)
+
+        // ExpandedPlayerSheet can appear before ContentView's onChange registers
+        // the parent window. Re-run the same sizing decision on the next turn so
+        // the inline presentation cannot miss its initial aspect setup.
+        DispatchQueue.main.async { [weak self] in
+            self?.synchronizeActiveWindowAspectRatio()
+        }
 
         // The overlay's render container may mount while the mini capsule is
         // still tearing down, leaving the shared render view parked with no
@@ -419,42 +512,62 @@ final class ExpandedPlayerWindowManager: NSObject {
         guard let parent = overlayParent else { return }
 
         LoggingService.shared.debug("ExpandedPlayerWindowManager: ending inline overlay", category: .player)
-        for observer in overlayFullScreenObservers {
+        for observer in overlayWindowObservers {
             NotificationCenter.default.removeObserver(observer)
         }
-        overlayFullScreenObservers = []
+        overlayWindowObservers = []
 
         // Leave the window fullscreen if the user was fullscreen before the
         // overlay began; only exit a fullscreen entered for the video.
+        // The will-exit observer is already gone, so undo the fullscreen
+        // panel hide here (the next player open re-derives the visibility
+        // from the preset anyway).
+        restoreCornerPanelsAfterFullScreen()
         if parent.styleMask.contains(.fullScreen), !overlayWasFullScreenAtBegin {
             parent.toggleFullScreen(nil)
         }
         if let wasVisible = overlayToolbarWasVisible {
             parent.toolbar?.isVisible = wasVisible
         }
+        restoreOverlaySizingConstraints(on: parent)
 
         AppEnvironment.shared.navigationCoordinator.isMacInlinePlayerFullScreen = false
         overlayToolbarWasVisible = nil
         overlayWasFullScreenAtBegin = false
+        isOverlayParentEnteringFullScreen = false
+        pendingFullScreenAspectRatio = nil
+        pendingLiveResizeAspectLock = nil
         overlayParent = nil
+        overlaySizingConstraints = nil
     }
 
-    /// Mirrors the parent window's fullscreen transitions into the coordinator
-    /// flag so the player controls stay in sync with exits the player's button
-    /// doesn't see (Esc, hover-revealed green button, Window menu, Mission
-    /// Control).
-    private func observeOverlayFullScreenTransitions(of parent: NSWindow) {
-        for observer in overlayFullScreenObservers {
+    /// Observes lifecycle events for the main window hosting the inline player.
+    /// Fullscreen events keep the controls in sync, while closing the window
+    /// must end playback just like closing the separate player window does.
+    private func observeOverlayWindowTransitions(of parent: NSWindow) {
+        for observer in overlayWindowObservers {
             NotificationCenter.default.removeObserver(observer)
         }
         let center = NotificationCenter.default
-        overlayFullScreenObservers = [
+        overlayWindowObservers = [
+            center.addObserver(
+                forName: NSWindow.willEnterFullScreenNotification,
+                object: parent,
+                queue: .main
+            ) { _ in
+                Task { @MainActor in
+                    let manager = ExpandedPlayerWindowManager.shared
+                    manager.isOverlayParentEnteringFullScreen = true
+                    manager.hideCornerPanelsForFullScreen()
+                }
+            },
             center.addObserver(
                 forName: NSWindow.didEnterFullScreenNotification,
                 object: parent,
                 queue: .main
             ) { _ in
                 Task { @MainActor in
+                    ExpandedPlayerWindowManager.shared.isOverlayParentEnteringFullScreen = false
                     AppEnvironment.shared.navigationCoordinator.isMacInlinePlayerFullScreen = true
                 }
             },
@@ -464,34 +577,87 @@ final class ExpandedPlayerWindowManager: NSObject {
                 queue: .main
             ) { _ in
                 Task { @MainActor in
+                    let manager = ExpandedPlayerWindowManager.shared
+                    manager.isOverlayParentEnteringFullScreen = false
                     AppEnvironment.shared.navigationCoordinator.isMacInlinePlayerFullScreen = false
+                    // Mirror of the enter order: the window is back at its
+                    // size first, then the panels slide in.
+                    manager.restoreCornerPanelsAfterFullScreen()
+                    if let window = manager.overlayParent {
+                        manager.replayPendingFullScreenAspectRatio(on: window)
+                    }
+                }
+            },
+            center.addObserver(
+                forName: NSWindow.didEndLiveResizeNotification,
+                object: parent,
+                queue: .main
+            ) { _ in
+                Task { @MainActor in
+                    ExpandedPlayerWindowManager.shared.applyPendingLiveResizeAspectLock()
+                }
+            },
+            center.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: parent,
+                queue: .main
+            ) { notification in
+                MainActor.assumeIsolated {
+                    guard let window = notification.object as? NSWindow else { return }
+                    ExpandedPlayerWindowManager.shared.handleInlineOverlayParentClose(window)
                 }
             },
         ]
     }
 
-    /// Restores a window that was hidden for PiP mode.
-    /// Call this when returning from PiP to show the player window again.
-    func restoreFromPiP(animated: Bool = true) {
-        guard let window = playerWindow else {
-            LoggingService.shared.debug("ExpandedPlayerWindowManager: restoreFromPiP - no window to restore", category: .player)
-            return
-        }
+    private func handleInlineOverlayParentClose(_ parent: NSWindow) {
+        guard overlayParent === parent else { return }
 
-        LoggingService.shared.debug("ExpandedPlayerWindowManager: restoreFromPiP called", category: .player)
+        LoggingService.shared.debug(
+            "ExpandedPlayerWindowManager: inline overlay parent closing, stopping playback",
+            category: .player
+        )
 
-        if animated {
-            window.alphaValue = 0
-            window.makeKeyAndOrderFront(nil)
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.25
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().alphaValue = 1
-            }
-        } else {
-            window.alphaValue = 1
-            window.makeKeyAndOrderFront(nil)
-        }
+        let appEnvironment = AppEnvironment.shared
+        appEnvironment.queueManager.clearQueue()
+        appEnvironment.playerService.stop()
+
+        // Remove the observer while the window is still alive, then unmount the
+        // player. A normal inline collapse does not take this path and continues
+        // playback in the mini player.
+        endInlineOverlay()
+        appEnvironment.navigationCoordinator.isPlayerExpanded = false
+    }
+
+    // MARK: - Corner Panels In Fullscreen
+
+    /// Native fullscreen means "video only": the corner layout's panels hide
+    /// for the fullscreen session (the layout animates them away and the
+    /// video grows over them), and come back on exit if this hid them. The
+    /// preset's remembered ("last visible") state is left untouched, so a
+    /// fullscreen session doesn't change what the next player open shows.
+    /// Returns whether this call hid the panels.
+    @discardableResult
+    func hideCornerPanelsForFullScreen() -> Bool {
+        let appEnvironment = AppEnvironment.shared
+        guard appEnvironment.navigationCoordinator.isCornerLayoutActive,
+              appEnvironment.settingsManager.landscapeDetailsPanelVisible else { return false }
+        cornerPanelsHiddenForFullScreen = true
+        appEnvironment.settingsManager.landscapeDetailsPanelVisible = false
+        LoggingService.shared.debug("ExpandedPlayerWindowManager: hid corner panels for fullscreen", category: .player)
+        return true
+    }
+
+    /// Restores the panels hidden by `hideCornerPanelsForFullScreen`, unless
+    /// the user showed them again while fullscreen (title tap) — then there is
+    /// nothing to undo.
+    func restoreCornerPanelsAfterFullScreen() {
+        guard cornerPanelsHiddenForFullScreen else { return }
+        cornerPanelsHiddenForFullScreen = false
+        let appEnvironment = AppEnvironment.shared
+        guard !appEnvironment.settingsManager.landscapeDetailsPanelVisible else { return }
+        appEnvironment.settingsManager.landscapeDetailsPanelVisible = true
+        LoggingService.shared.debug("ExpandedPlayerWindowManager: restored corner panels after fullscreen", category: .player)
     }
 
     /// Cleans up a window that was hidden for PiP when PiP ends without restoring.
@@ -522,18 +688,28 @@ final class ExpandedPlayerWindowManager: NSObject {
     ///   - aspectRatio: Video width / height ratio
     ///   - animated: Whether to animate the resize
     func resizeToFitAspectRatio(_ aspectRatio: Double, animated: Bool = true) {
-        guard let window = playerWindow else { return }
+        guard let window = activePlayerWindow else { return }
         guard aspectRatio > 0 else { return }
 
         // In native fullscreen the video must keep the whole screen; constraining
         // or reframing the window here would letterbox the content inside the
         // fullscreen space. Park the ratio and replay it on fullscreen exit.
-        if isPlayerWindowFullScreen {
+        if isActivePlayerWindowFullScreen {
             pendingFullScreenAspectRatio = aspectRatio
             LoggingService.shared.debug(
                 "resizeToFitAspectRatio deferred while fullscreen aspect=\(aspectRatio)",
                 category: .player
             )
+            return
+        }
+
+        // Never reframe the window under the user's cursor. Auto-fit during a
+        // live drag fights the drag (and, when the fitted size crosses the
+        // corner-layout width threshold, oscillates between layouts every
+        // frame). The user's drag owns the size; drop the fit and only keep
+        // the aspect lock in sync (deferred to the end of the drag).
+        if window.inLiveResize {
+            lockAspectRatio(aspectRatio)
             return
         }
 
@@ -579,16 +755,137 @@ final class ExpandedPlayerWindowManager: NSObject {
     /// changing the current frame. Use this when the auto-resize setting is
     /// disabled but we still want manual resizing to be ratio-locked.
     func lockAspectRatio(_ aspectRatio: Double) {
-        guard let window = playerWindow else { return }
+        guard let window = activePlayerWindow else { return }
         guard aspectRatio > 0 else { return }
-        if isPlayerWindowFullScreen {
+        if isActivePlayerWindowFullScreen {
             pendingFullScreenAspectRatio = aspectRatio
+            return
+        }
+        if window.inLiveResize {
+            pendingLiveResizeAspectLock = .lock(aspectRatio)
             return
         }
         Self.applyAspectRatioConstraint(aspectRatio, to: window)
     }
 
+    /// Removes the window's aspect-ratio resize constraint so it resizes
+    /// freely. Used by the corner layout, where the window frames the whole
+    /// video-plus-panels arrangement rather than the video alone. The size
+    /// floor stays enforced by `windowWillResize(_:to:)`.
+    func unlockAspectRatio() {
+        guard let window = activePlayerWindow else { return }
+        pendingFullScreenAspectRatio = nil
+        if window.inLiveResize {
+            pendingLiveResizeAspectLock = .unlock
+            return
+        }
+        // `aspectRatio` and `resizeIncrements` are mutually exclusive: setting
+        // one resets the other. Assigning a zero aspect ratio does NOT clear the
+        // lock — it leaves AppKit's aspect handler active with a degenerate 0:0
+        // ratio, which makes interactive resize a no-op (the window can't be
+        // resized at all). Resetting the increments to 1×1 is the supported way
+        // to return to free resizing.
+        if window === overlayParent {
+            restoreOverlaySizingConstraints(on: window)
+        } else {
+            window.contentResizeIncrements = NSSize(width: 1, height: 1)
+            growToCornerLayoutMinimum(window)
+        }
+        LoggingService.shared.debug(
+            "unlockAspectRatio (corner layout) aspect=\(window.contentAspectRatio) increments=\(window.contentResizeIncrements)",
+            category: .player
+        )
+    }
+
+    /// Smallest window the corner layout fits in: its width threshold (below
+    /// it the layout falls back to stacked), room for the narrowest side
+    /// column next to a video column wide enough for the controls, and
+    /// enough height for the video plus the below-video panel, capped to the
+    /// screen.
+    static func cornerLayoutMinimumSize(for screen: NSScreen?) -> NSSize {
+        let columnsWidth = CornerPlayerLayout<EmptyView>.minColumnWidth
+            + CornerPlayerLayout<EmptyView>.grabberWidth
+            + CornerPlayerLayout<EmptyView>.minVideoColumnWidth
+        var size = NSSize(
+            width: max(ExpandedPlayerSheet.minWidthForCornerLayout, columnsWidth),
+            height: ExpandedPlayerSheet.minHeightForCornerLayout
+        )
+        if let visibleFrame = screen?.visibleFrame {
+            size.width = min(size.width, visibleFrame.width)
+            size.height = min(size.height, visibleFrame.height)
+        }
+        return size
+    }
+
+    /// The corner layout resolves from window width only, so it can take over
+    /// a window shorter than it needs; grow the height (keeping the top edge)
+    /// so the floor `windowWillResize(_:to:)` enforces holds from the start.
+    private func growToCornerLayoutMinimum(_ window: NSWindow) {
+        guard !isActivePlayerWindowFullScreen else { return }
+        let screen = window.screen ?? NSScreen.main
+        let minimum = Self.cornerLayoutMinimumSize(for: screen)
+        var frame = window.frame
+        guard frame.width < minimum.width || frame.height < minimum.height else { return }
+        let top = frame.maxY
+        frame.size.width = max(frame.width, minimum.width)
+        frame.size.height = max(frame.height, minimum.height)
+        frame.origin.y = top - frame.height
+        if let screen {
+            frame = constrainToScreen(frame, screen: screen)
+        }
+        window.setFrame(frame, display: true, animate: true)
+    }
+
     // MARK: - Private Helpers
+
+    private func synchronizeActiveWindowAspectRatio() {
+        let appEnvironment = AppEnvironment.shared
+        if appEnvironment.isCornerPanelLayoutActive {
+            unlockAspectRatio()
+            return
+        }
+        guard let aspectRatio = appEnvironment.playerService.state.videoAspectRatio,
+              aspectRatio > 0 else { return }
+        lockAspectRatio(aspectRatio)
+        if appEnvironment.settingsManager.playerSheetAutoResize {
+            resizeToFitAspectRatio(aspectRatio, animated: false)
+        }
+    }
+
+    private func restoreOverlaySizingConstraints(on window: NSWindow) {
+        guard let constraints = overlaySizingConstraints else { return }
+        window.contentMinSize = constraints.contentMinSize
+        window.minSize = constraints.minSize
+        if constraints.contentAspectRatio.width > 0,
+           constraints.contentAspectRatio.height > 0 {
+            window.contentAspectRatio = constraints.contentAspectRatio
+        } else {
+            // Setting resize increments is AppKit's supported way to clear an
+            // aspect constraint; assigning a zero contentAspectRatio is not.
+            window.contentResizeIncrements = constraints.contentResizeIncrements
+        }
+    }
+
+    private func applyPendingLiveResizeAspectLock() {
+        guard let pending = pendingLiveResizeAspectLock else { return }
+        pendingLiveResizeAspectLock = nil
+        switch pending {
+        case let .lock(ratio):
+            lockAspectRatio(ratio)
+        case .unlock:
+            unlockAspectRatio()
+        }
+    }
+
+    private func replayPendingFullScreenAspectRatio(on window: NSWindow) {
+        guard let ratio = pendingFullScreenAspectRatio else { return }
+        pendingFullScreenAspectRatio = nil
+        guard !AppEnvironment.shared.isCornerPanelLayoutActive else { return }
+        Self.applyAspectRatioConstraint(ratio, to: window)
+        if AppEnvironment.shared.settingsManager.playerSheetAutoResize {
+            resizeToFitAspectRatio(ratio, animated: false)
+        }
+    }
 
     /// Sets `contentAspectRatio` and a ratio-consistent minimum content size on
     /// the window so that interactive resize couples width and height
@@ -729,7 +1026,7 @@ extension ExpandedPlayerWindowManager: NSWindowDelegate {
     /// So the floor is computed here from constants and applied to the proposed
     /// (already aspect-correct) frame, growing any under-sized proposal back up
     /// while preserving its ratio.
-    nonisolated func windowWillResize(_: NSWindow, to frameSize: NSSize) -> NSSize {
+    nonisolated func windowWillResize(_ window: NSWindow, to frameSize: NSSize) -> NSSize {
         MainActor.assumeIsolated {
             // Enforce the floor from constants here rather than from
             // `window.minSize`/`contentMinSize`: NSHostingController resets those
@@ -738,23 +1035,45 @@ extension ExpandedPlayerWindowManager: NSWindowDelegate {
             // `contentAspectRatio` to `frameSize`, so we only need to grow an
             // under-sized proposal back up to the minimum while preserving its
             // (already correct) aspect ratio.
-            let aspect = frameSize.height > 0
-                ? frameSize.width / frameSize.height
-                : CGFloat(Self.defaultAspectRatio)
+            let isAspectLocked = window.contentAspectRatio.width > 0
 
-            var height = max(frameSize.height, Self.minHeight)
-            var width = height * aspect
+            var width: CGFloat
+            var height: CGFloat
+            if isAspectLocked {
+                let aspect = frameSize.height > 0
+                    ? frameSize.width / frameSize.height
+                    : CGFloat(Self.defaultAspectRatio)
 
-            // Guard the width floor too (for narrow/portrait videos where the
-            // height minimum alone would leave the window too thin), then rederive
-            // height so the result stays on the proposed aspect ratio.
-            let minWidthFloor = max(Self.minHeight * aspect, 320)
-            if width < minWidthFloor {
-                width = minWidthFloor
-                height = aspect > 0 ? width / aspect : height
+                height = max(frameSize.height, Self.minHeight)
+                width = height * aspect
+
+                // Guard the width floor too (for narrow/portrait videos where the
+                // height minimum alone would leave the window too thin), then rederive
+                // height so the result stays on the proposed aspect ratio.
+                let minWidthFloor = max(Self.minHeight * aspect, 320)
+                if width < minWidthFloor {
+                    width = minWidthFloor
+                    height = aspect > 0 ? width / aspect : height
+                }
+            } else {
+                // Free resize (corner layout): clamp each axis on its own.
+                // Preserving the proposal's ratio here would widen the window
+                // while the user drags only its bottom edge past the floor.
+                // The floor is the corner layout's own minimum, so a drag
+                // can't squeeze the layout or push it under its width
+                // threshold (which would flip it to stacked mid-drag).
+                let minimum = Self.cornerLayoutMinimumSize(for: window.screen ?? NSScreen.main)
+                width = max(frameSize.width, minimum.width)
+                height = max(frameSize.height, minimum.height)
             }
 
             return NSSize(width: width, height: height)
+        }
+    }
+
+    nonisolated func windowDidEndLiveResize(_: Notification) {
+        MainActor.assumeIsolated {
+            applyPendingLiveResizeAspectLock()
         }
     }
 
@@ -799,8 +1118,27 @@ extension ExpandedPlayerWindowManager: NSWindowDelegate {
         return false
     }
 
+    nonisolated func windowWillEnterFullScreen(_: Notification) {
+        MainActor.assumeIsolated {
+            isPlayerWindowEnteringFullScreen = true
+            hideCornerPanelsForFullScreen()
+        }
+    }
+
+    nonisolated func windowDidEnterFullScreen(_: Notification) {
+        MainActor.assumeIsolated {
+            isPlayerWindowEnteringFullScreen = false
+        }
+    }
+
     nonisolated func windowDidExitFullScreen(_ notification: Notification) {
         MainActor.assumeIsolated {
+            isPlayerWindowEnteringFullScreen = false
+            // Mirror of the enter order: the window is back at its size
+            // first, then the panels slide in. Restoring flips
+            // `isCornerPanelLayoutActive` back on, so the aspect-ratio replay
+            // below is skipped (the corner layout then unlocks the ratio).
+            restoreCornerPanelsAfterFullScreen()
             guard let window = playerWindow else { return }
             // Restore the pinned (floating) config that toggleFullScreen
             // dropped so the window could enter primary fullscreen.
@@ -811,14 +1149,21 @@ extension ExpandedPlayerWindowManager: NSWindowDelegate {
             // advanced to a different-aspect video): restore the manual-resize
             // ratio lock, and auto-fit the window if that setting is on —
             // exactly what the aspect-change handler would have done windowed.
-            if let ratio = pendingFullScreenAspectRatio {
-                pendingFullScreenAspectRatio = nil
-                Self.applyAspectRatioConstraint(ratio, to: window)
-                if appEnvironment?.settingsManager.playerSheetAutoResize == true {
-                    resizeToFitAspectRatio(ratio, animated: false)
-                }
-            }
+            replayPendingFullScreenAspectRatio(on: window)
         }
+    }
+}
+
+// MARK: - Free-Resize Gate
+
+extension AppEnvironment {
+    /// Whether the player window should resize freely instead of following
+    /// the video aspect ratio: the corner layout is resolved AND its panel
+    /// regions are shown, so the window frames video plus panels. Hiding the
+    /// panels in corner mode leaves only the video, which follows the ratio
+    /// lock (and auto-fit) exactly like the stacked layout.
+    var isCornerPanelLayoutActive: Bool {
+        navigationCoordinator.isCornerLayoutActive && settingsManager.landscapeDetailsPanelVisible
     }
 }
 
@@ -833,6 +1178,7 @@ extension ExpandedPlayerWindowManager: NSWindowDelegate {
 /// its player window renders, and removes the perceptible "dead gap" between the
 /// click and the window appearing.
 private struct ExpandedPlayerWindowRoot: View {
+    @Environment(\.appEnvironment) private var appEnvironment
     @State private var showFullPlayer = false
 
     var body: some View {
@@ -842,7 +1188,11 @@ private struct ExpandedPlayerWindowRoot: View {
             Color.black
 
             if showFullPlayer {
-                ExpandedPlayerSheet()
+                ExpandedPlayerSheet(
+                    initialPortraitPanelVisible: ExpandedPlayerSheet.initialPortraitPanelVisibility(
+                        settingsManager: appEnvironment?.settingsManager
+                    )
+                )
             } else {
                 ProgressView()
                     .controlSize(.large)

@@ -19,6 +19,9 @@ enum SettingsKey: String, CaseIterable {
     case useSeparateDarkAccentColor
     case showWatchedCheckmark
 
+    // Accounts
+    case showAccountPickers
+
     // Playback
     case preferredQuality
     case cellularQuality
@@ -67,6 +70,7 @@ enum SettingsKey: String, CaseIterable {
     case inAppOrientationLock
     case rotateToMatchAspectRatio
     case preferPortraitBrowsing
+    case tabletopReflection
 
     // Home
     case homeShortcutOrder
@@ -83,6 +87,9 @@ enum SettingsKey: String, CaseIterable {
 
     // Top Shelf (tvOS)
     case topShelfSections
+
+    // Navigation layout (iPad, iPhone Duo inner screen)
+    case navigationStyle
 
     // Tab Bar (compact size class)
     case tabBarItemOrder
@@ -125,10 +132,13 @@ enum SettingsKey: String, CaseIterable {
     case tvVideoSyncMode
 
     // Details panel
-    case floatingDetailsPanelSide // Landscape only - which side the panel appears on
     case floatingDetailsPanelWidth // Resizable panel width in wide layout
     case landscapeDetailsPanelVisible
     case landscapeDetailsPanelPinned
+    case detailsPanelLastVisible // Legacy shared "remember" value (pre-split); read as fallback only
+    case portraitDetailsPanelLastVisible // Last user-set portrait visibility, for the "remember" default
+    case landscapeDetailsPanelLastVisible // Last user-set landscape visibility, for the "remember" default
+    case cornerPanelColumnWidth // Corner layout - width of the side column
 
     // Player Controls
     case activeControlsPresetID
@@ -155,15 +165,17 @@ enum SettingsKey: String, CaseIterable {
              // Top Shelf — tvOS only
              .topShelfSections,
              // Tab bar (compact size class) layout
-             .tabBarItemOrder, .tabBarItemVisibility, .tabBarStartupTab,
+             .navigationStyle, .tabBarItemOrder, .tabBarItemVisibility, .tabBarStartupTab,
              // Sidebar layout/selection
              .sidebarMainItemOrder, .sidebarMainItemVisibility, .sidebarStartupTab,
              .sidebarSourcesEnabled, .sidebarSourceSort, .sidebarSourcesLimitEnabled, .sidebarMaxSources,
              .sidebarChannelsEnabled, .sidebarMaxChannels, .sidebarChannelSort, .sidebarChannelsLimitEnabled,
              .sidebarPlaylistsEnabled, .sidebarMaxPlaylists, .sidebarPlaylistSort, .sidebarPlaylistsLimitEnabled,
              // Player details panel — iOS/iPadOS only, different on other platforms
-             .floatingDetailsPanelSide, .floatingDetailsPanelWidth,
+             .floatingDetailsPanelWidth,
              .landscapeDetailsPanelVisible, .landscapeDetailsPanelPinned,
+             .detailsPanelLastVisible, .portraitDetailsPanelLastVisible, .landscapeDetailsPanelLastVisible,
+             .cornerPanelColumnWidth,
              // Video swipe actions — touch-gesture feature
              .videoSwipeActionOrder, .videoSwipeActionVisibility:
             return true

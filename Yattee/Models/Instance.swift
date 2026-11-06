@@ -58,6 +58,11 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
     /// The base URL of the instance.
     let url: URL
 
+    /// Optional URL of the web frontend, when it differs from the API URL
+    /// (Piped serves its API and frontend from separate hosts). Used for
+    /// browser-facing actions (open in browser, copy link) — never for API calls.
+    var frontendURL: URL?
+
     /// Optional user-defined name for this instance.
     var name: String?
 
@@ -66,9 +71,6 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
 
     /// The date this instance was added.
     let dateAdded: Date
-
-    /// Optional API key if required by the instance.
-    var apiKey: String?
 
     /// Whether to allow invalid/self-signed SSL certificates.
     var allowInvalidCertificates: Bool
@@ -82,8 +84,21 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
     /// Yattee Server always requires basic auth regardless of this flag.
     var usesBasicAuth: Bool
 
-    /// Whether the user has logged into an account on this instance (Invidious/Piped).
-    /// Set on login, so a missing Keychain credential can be detected after reinstall.
+    /// Whether a pre-revamp single login existed on this instance.
+    ///
+    /// Migration-only state. Signing in no longer sets it (see
+    /// `AccountSignInHandler`) — accounts describe logins now. It survives
+    /// because `AccountsManager.reconcileLegacyAccounts()` reads it to
+    /// synthesize the account an upgrading install should have, and because a
+    /// missing Keychain credential on an instance that has no accounts yet can
+    /// still only be detected through it.
+    ///
+    /// Everything that writes it is migration machinery:
+    /// `LegacyDataMigrationService` raises it for a login imported from
+    /// Yattee 1, `AppEnvironment.backfillCredentialFlags()` revives it when the
+    /// flag was lost but its instance-keyed credential was not, and
+    /// `AppEnvironment.signOutAndRemoveAccount(_:)` lowers it once the last
+    /// account on the instance is gone.
     var usesAccountLogin: Bool
 
     // MARK: - Initialization
@@ -92,10 +107,10 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
         id: UUID = UUID(),
         type: InstanceType,
         url: URL,
+        frontendURL: URL? = nil,
         name: String? = nil,
         isEnabled: Bool = true,
         dateAdded: Date = Date(),
-        apiKey: String? = nil,
         allowInvalidCertificates: Bool = false,
         proxiesVideos: Bool = false,
         usesBasicAuth: Bool = false,
@@ -104,10 +119,10 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
         self.id = id
         self.type = type
         self.url = url
+        self.frontendURL = frontendURL
         self.name = name
         self.isEnabled = isEnabled
         self.dateAdded = dateAdded
-        self.apiKey = apiKey
         self.allowInvalidCertificates = allowInvalidCertificates
         self.proxiesVideos = proxiesVideos
         self.usesBasicAuth = usesBasicAuth
@@ -119,10 +134,10 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
         id = try container.decode(UUID.self, forKey: .id)
         type = try container.decode(InstanceType.self, forKey: .type)
         url = try container.decode(URL.self, forKey: .url)
+        frontendURL = try container.decodeIfPresent(URL.self, forKey: .frontendURL)
         name = try container.decodeIfPresent(String.self, forKey: .name)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
         dateAdded = try container.decode(Date.self, forKey: .dateAdded)
-        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
         allowInvalidCertificates = try container.decode(Bool.self, forKey: .allowInvalidCertificates)
         proxiesVideos = try container.decodeIfPresent(Bool.self, forKey: .proxiesVideos) ?? false
         usesBasicAuth = try container.decodeIfPresent(Bool.self, forKey: .usesBasicAuth) ?? false
@@ -135,6 +150,13 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
         name ?? url.host ?? url.absoluteString
     }
 
+    /// The shortest thing that names this source to the user: its title when
+    /// one is set, else its host. What account labels append after the `@`.
+    var shortLabel: String? {
+        if let name, !name.isEmpty { return name }
+        return url.host
+    }
+
     /// Returns the URL string with embedded credentials stripped for safe display in the UI.
     var displayURL: String {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -144,6 +166,24 @@ struct Instance: Identifiable, Codable, Hashable, Sendable {
         components.user = nil
         components.password = nil
         return components.url?.absoluteString ?? url.absoluteString
+    }
+
+    /// The URL browser-facing actions should use: the web frontend when one is
+    /// configured, else the API URL.
+    var browseURL: URL {
+        frontendURL ?? url
+    }
+
+    /// Base URL of the web watch page for building shareable YouTube links,
+    /// when this instance has one: Invidious serves its frontend at the API
+    /// URL, Piped needs the separately configured frontend URL (its API host
+    /// has no watch pages), and Yattee Server has no web frontend at all.
+    var watchPageBaseURL: URL? {
+        switch type {
+        case .invidious: return frontendURL ?? url
+        case .piped: return frontendURL
+        case .peertube, .yatteeServer: return nil
+        }
     }
 
     var contentSource: ContentSource {
@@ -175,13 +215,18 @@ extension Instance {
     }
 
     /// Whether this instance supports user authentication/login.
+    ///
+    /// Answered by the capability table rather than a type list: an instance
+    /// offers a sign-in exactly when an account on it can do something, so a
+    /// backend that gains accounts gets its login by adding one row in
+    /// ``InstanceType/accountCapabilities``.
     var supportsAuthentication: Bool {
-        type == .invidious || type == .piped
+        type.accountCapabilities.supportsAccounts
     }
 
     /// Whether this instance supports subscription feed.
     var supportsFeed: Bool {
-        type == .invidious || type == .piped
+        type.accountCapabilities.supportsFeed
     }
 
     /// Whether this instance supports search suggestions/autocomplete.

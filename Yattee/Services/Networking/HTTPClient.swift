@@ -24,13 +24,41 @@ actor HTTPClient {
 
     // MARK: - Initialization
 
-    init(session: URLSession = .shared, decoder: JSONDecoder = .init()) {
+    /// - Parameters:
+    ///   - userAgent: the User-Agent to send from the very first request. The
+    ///     setter below cannot serve that purpose for a client built inside a
+    ///     synchronous factory: awaiting it there is impossible, and scheduling
+    ///     it races the first request out of the door.
+    ///   - randomizeUserAgentPerRequest: whether to mint a fresh random
+    ///     User-Agent per request instead, ignoring `userAgent`.
+    init(
+        session: URLSession = .shared,
+        decoder: JSONDecoder = .init(),
+        userAgent: String? = nil,
+        randomizeUserAgentPerRequest: Bool = false
+    ) {
         self.session = session
         self.decoder = decoder
+        self.userAgent = userAgent
+        self.randomizeUserAgentPerRequest = randomizeUserAgentPerRequest
 
-        // Configure decoder for common API patterns
-        self.decoder.keyDecodingStrategy = .convertFromSnakeCase
-        self.decoder.dateDecodingStrategy = .iso8601
+        Self.configureForAPIs(self.decoder)
+    }
+
+    /// Applies the decoding rules every instance API response is parsed with.
+    ///
+    /// Exposed so code that parses an already-fetched payload — a merged page
+    /// set, say — decodes it exactly the way the network path would.
+    nonisolated static func configureForAPIs(_ decoder: JSONDecoder) {
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+    }
+
+    /// A decoder configured the way this client decodes API responses.
+    nonisolated static func makeAPIDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        configureForAPIs(decoder)
+        return decoder
     }
 
     // MARK: - Configuration
@@ -151,6 +179,8 @@ actor HTTPClient {
 
         do {
             (data, response) = try await session.data(for: finalRequest)
+            PerfCounter.count("net.api.request")
+            PerfCounter.count("net.api.bytes", by: data.count)
         } catch let error as URLError {
             let apiError = mapURLError(error)
             // Add more context for cancelled requests
@@ -200,6 +230,16 @@ actor HTTPClient {
     ) async throws -> T {
         let data = try await performRaw(request, customHeaders: customHeaders)
 
+        // A body with nothing in it is a failed answer however the status line
+        // reads: instances do answer `200` with zero bytes, and that is not a
+        // response any of these types can be decoded from.
+        guard !data.isEmpty else {
+            Task { @MainActor in
+                LoggingService.shared.error("API returned an empty response body", category: .api)
+            }
+            throw APIError.decodingError("Empty response body")
+        }
+
         do {
             return try decoder.decode(T.self, from: data)
         } catch let error as DecodingError {
@@ -242,6 +282,14 @@ actor HTTPClient {
             return .timeout
         case .notConnectedToInternet, .networkConnectionLost:
             return .noConnection
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            // A server that refuses the connection, or a name that does not
+            // resolve, used to arrive as `unknown` — which nothing classifies,
+            // so an account pointed at a downed instance never went
+            // `unreachable`, never fell back to local data and never got its
+            // retry. It is not the same failure as a timeout, but it deserves
+            // the same treatment.
+            return .connectionFailed(error.localizedDescription)
         case .cancelled:
             return .cancelled
         default:

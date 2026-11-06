@@ -91,7 +91,6 @@ private struct PlayerControlsSettingsContent: View {
             )
             LayoutSectionsSection(viewModel: viewModel)
             #if os(iOS)
-            CommentsPillSection(viewModel: viewModel)
             GesturesSectionsSection(viewModel: viewModel)
             #endif
             SystemControlsSection(viewModel: viewModel)
@@ -398,45 +397,30 @@ private struct LayoutSectionsSection: View {
                 )
             }
             .disabled(!viewModel.canEditActivePreset)
+
+            // The details panel exists in the iOS and macOS players.
+            #if os(iOS) || os(macOS)
+            NavigationLink {
+                PanelSettingsView(viewModel: viewModel)
+            } label: {
+                HStack {
+                    Label(
+                        String(localized: "settings.playerControls.detailsPanel"),
+                        systemImage: "sidebar.trailing"
+                    )
+                    Spacer()
+                    Text("\(viewModel.enabledPanelPageCount)")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(!viewModel.canEditActivePreset)
+            #endif
         } header: {
             Text(String(localized: "settings.playerControls.layoutSections"))
         } footer: {
             if !viewModel.canEditActivePreset {
                 Text(String(localized: "settings.playerControls.duplicateToEdit"))
             }
-        }
-    }
-}
-
-// MARK: - Comments Pill Section
-
-private struct CommentsPillSection: View {
-    @Bindable var viewModel: PlayerControlsSettingsViewModel
-
-    // Local state for immediate UI updates
-    @State private var commentsPillMode: CommentsPillMode = .pill
-
-    var body: some View {
-        Section {
-            Picker(
-                String(localized: "commentsPill.mode.title"),
-                selection: $commentsPillMode
-            ) {
-                ForEach(CommentsPillMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .disabled(!viewModel.canEditActivePreset)
-            .onChange(of: commentsPillMode) { _, newValue in
-                guard newValue != viewModel.commentsPillMode else { return }
-                viewModel.syncCommentsPillMode(newValue)
-            }
-        }
-        .onAppear {
-            commentsPillMode = viewModel.commentsPillMode
-        }
-        .onChange(of: viewModel.activePreset?.id) { _, _ in
-            commentsPillMode = viewModel.commentsPillMode
         }
     }
 }

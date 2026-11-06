@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if !os(tvOS)
+import TipKit
+#endif
 import Combine
 import CloudKit
 import Nuke
@@ -34,35 +37,42 @@ struct YatteeApp: App {
     @State private var lastCheckedClipboardURL: URL?
     @Environment(\.scenePhase) private var scenePhase
 
-    // Deep link handling state
-    @State private var prefilledLinkURL: URL?
-    #if !os(tvOS)
-    @State private var deepLinkVideo: Video?
-    @State private var deepLinkStreams: [Stream] = []
-    @State private var deepLinkCaptions: [Caption] = []
-    @State private var showingDeepLinkDownloadSheet = false
-    #endif
-
     // First-launch state
     @State private var showingICloudAlert = false
     @State private var showingICloudProgress = false
     @State private var showingLegacyAccountsAlert = false
     @State private var showingLegacyAccountsImport = false
-    #if os(iOS)
-    @State private var showingSettings = false
-    #endif
-    @State private var showingOpenLinkSheet = false
 
     // Ambiguous-link prompts are stored on NavigationCoordinator so they can
     // be dual-hosted by the root app view (here) and the expanded player sheet.
+
+    #if !os(tvOS)
+    /// Configures TipKit. Called once per launch.
+    static func configureTips() {
+        try? Tips.configure([.displayFrequency(.immediate), .datastoreLocation(.applicationDefault)])
+    }
+    #endif
 
     init() {
         // Configure Nuke image loading pipeline
         ImageLoadingService.shared.configure()
 
+        // TipKit: one-time hints such as the video info "tap thumbnail to play" tip.
+        // TipKit opens its own SwiftData store, so on iOS it is configured from
+        // `AppDelegate.didFinishLaunching` together with the app store, never
+        // here: this init also runs during prewarm launches (0xdead10cc).
+        #if os(macOS)
+        Self.configureTips()
+        #endif
+
         // Register background tasks early — Apple requires BGTaskScheduler.register()
         // to be called during the app launch sequence, before the run loop starts.
         appEnvironment.backgroundRefreshManager.registerBackgroundTasks()
+
+        #if os(iOS)
+        BackgroundDiagnostics.shared.start(playerService: AppEnvironment.shared.playerService)
+        #endif
+        PerformanceMonitor.shared.start(appEnvironment: AppEnvironment.shared)
     }
 
     var body: some Scene {
@@ -78,9 +88,36 @@ struct YatteeApp: App {
                 .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
                 #endif
                 .onOpenURL { url in
+                    let callback = XCallback(url)
+                    if let action = LinkActionParser().parse(url) {
+                        if action.dismissesPresentations {
+                            appEnvironment.navigationCoordinator.dismissPresentations()
+                        }
+                        Task {
+                            let result = await LinkActionPerformer(appEnvironment: appEnvironment).perform(action)
+                            callback?.open(for: result)
+                        }
+                        return
+                    }
+                    if let callback {
+                        // An x-callback-url request Yattee can't run: tell the caller
+                        reportUnhandledDeepLink(url)
+                        callback.open(for: .failure(
+                            code: "unsupportedAction",
+                            message: String(localized: "deepLink.unsupported.title", defaultValue: "Can't open link")
+                        ))
+                        return
+                    }
+                    // Leave open sheets alone when the link goes nowhere
+                    guard URLRouter().route(url) != nil else {
+                        reportUnhandledDeepLink(url)
+                        return
+                    }
+                    appEnvironment.navigationCoordinator.dismissPresentations()
                     handleDeepLink(url)
                 }
                 .onContinueUserActivity(HandoffManager.activityType) { activity in
+                    appEnvironment.navigationCoordinator.dismissPresentations()
                     handleContinuedActivity(activity)
                 }
                 .onAppear {
@@ -98,6 +135,7 @@ struct YatteeApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .continueUserActivity)) { notification in
                     if let activity = notification.object as? NSUserActivity {
+                        appEnvironment.navigationCoordinator.dismissPresentations()
                         handleContinuedActivity(activity)
                     }
                 }
@@ -114,38 +152,6 @@ struct YatteeApp: App {
                         Text(String(localized: "alert.openVideo.message \(url.host ?? "clipboard")"))
                     }
                 }
-                .sheet(item: $prefilledLinkURL) { url in
-                    OpenLinkSheet(prefilledURL: url)
-                        .appEnvironment(appEnvironment)
-                }
-                .sheet(item: Binding<Video?>(
-                    get: {
-                        // Only host the sheet here when the player is not expanded.
-                        // When expanded, ExpandedPlayerSheet hosts it so it appears above the player window.
-                        guard !appEnvironment.navigationCoordinator.isPlayerExpanded else { return nil }
-                        return appEnvironment.navigationCoordinator.descriptionLinkQueueSheetVideo
-                    },
-                    set: { newValue in
-                        if newValue == nil {
-                            appEnvironment.navigationCoordinator.descriptionLinkQueueSheetVideo = nil
-                        }
-                    }
-                )) { video in
-                    QueueActionSheet(video: video)
-                        .appEnvironment(appEnvironment)
-                }
-                #if !os(tvOS)
-                .sheet(isPresented: $showingDeepLinkDownloadSheet) {
-                    if let video = deepLinkVideo {
-                        DownloadQualitySheet(
-                            video: video,
-                            streams: deepLinkStreams,
-                            captions: deepLinkCaptions
-                        )
-                        .appEnvironment(appEnvironment)
-                    }
-                }
-                #endif
                 #endif
                 // First-launch iCloud sync prompt
                 .alert(
@@ -182,11 +188,9 @@ struct YatteeApp: App {
                 .fullScreenCover(isPresented: $showingICloudProgress) {
                     ICloudSyncProgressView()
                         .appEnvironment(appEnvironment)
-                        #if os(tvOS)
                         // tvOS full screen covers have a transparent background,
                         // letting the view below leak through.
-                        .background(Color.black.ignoresSafeArea())
-                        #endif
+                        .tvFullScreenCoverBackground()
                 }
                 #endif
                 #if os(tvOS)
@@ -202,7 +206,7 @@ struct YatteeApp: App {
                         }
                         .appEnvironment(appEnvironment)
                     }
-                    .background(Color.black.ignoresSafeArea())
+                    .tvFullScreenCoverBackground()
                 }
                 #else
                 .sheet(isPresented: $showingLegacyAccountsImport) {
@@ -215,26 +219,9 @@ struct YatteeApp: App {
                     #endif
                 }
                 #endif
-                #if os(iOS)
-                .sheet(isPresented: $showingSettings) {
-                    SettingsView()
-                        .appEnvironment(appEnvironment)
-                }
-                #endif
-                #if !os(tvOS)
-                .sheet(isPresented: $showingOpenLinkSheet) {
-                    OpenLinkSheet()
-                        .appEnvironment(appEnvironment)
-                }
-                #endif
-                #if os(iOS)
-                .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in
-                    showingSettings = true
-                }
-                #endif
                 .onReceive(NotificationCenter.default.publisher(for: .showOpenLinkSheet)) { _ in
                     appEnvironment.navigationCoordinator.isPlayerExpanded = false
-                    showingOpenLinkSheet = true
+                    appEnvironment.navigationCoordinator.presenter.present(.openLink(nil))
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .openDescriptionLink)) { notification in
                     if let url = notification.object as? URL {
@@ -288,13 +275,10 @@ struct YatteeApp: App {
                 // Refresh media source password status (Keychain state can change in background)
                 appEnvironment.mediaSourcesManager.refreshPasswordStoredStatus()
 
-                // Validate subscription account (auto-correct if invalid)
-                appEnvironment.subscriptionAccountValidator.validateAndCorrectIfNeeded()
-                SubscriptionFeedCache.shared.warmIfNeeded(using: appEnvironment)
-
-                // Fetch remote CloudKit changes (catches missed push notifications)
+                // Identity, statuses, deletion repair and the fetch, in that
+                // order — each one is what makes the next one correct.
                 Task {
-                    await appEnvironment.cloudKitSync.fetchRemoteChanges()
+                    await resumeAccountState()
                 }
 
                 // Start periodic polling as fallback for missed push notifications
@@ -308,6 +292,9 @@ struct YatteeApp: App {
                 appEnvironment.playerService.syncWatchProgress()
                 Task {
                     await appEnvironment.cloudKitSync.flushPendingChanges()
+                    // The progress save above is what enqueues the server-history
+                    // post, so the flush is created after it.
+                    await appEnvironment.watchHistorySync.flushPending()
                 }
             }
         }
@@ -335,17 +322,14 @@ struct YatteeApp: App {
                 // Refresh media source password status (Keychain state can change in background)
                 appEnvironment.mediaSourcesManager.refreshPasswordStoredStatus()
 
-                // Validate subscription account (auto-correct if invalid)
-                appEnvironment.subscriptionAccountValidator.validateAndCorrectIfNeeded()
-                SubscriptionFeedCache.shared.warmIfNeeded(using: appEnvironment)
+                // Identity, statuses, deletion repair and the fetch, in that
+                // order — each one is what makes the next one correct.
+                Task {
+                    await resumeAccountState()
+                }
 
                 // Check clipboard for external video URLs
                 checkClipboardForExternalURL()
-
-                // Fetch remote CloudKit changes (catches missed push notifications)
-                Task {
-                    await appEnvironment.cloudKitSync.fetchRemoteChanges()
-                }
 
                 // Start periodic polling as fallback for missed push notifications
                 appEnvironment.cloudKitSync.startForegroundPolling()
@@ -365,6 +349,7 @@ struct YatteeApp: App {
                 // assertion keeps the app alive until the async flush finishes.
                 var backgroundTask: UIBackgroundTaskIdentifier = .invalid
                 backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "PersistOnBackground") {
+                    LoggingService.shared.warning("Background task PersistOnBackground expired", category: .diagnostics)
                     if backgroundTask != .invalid {
                         UIApplication.shared.endBackgroundTask(backgroundTask)
                         backgroundTask = .invalid
@@ -375,7 +360,12 @@ struct YatteeApp: App {
                 appEnvironment.dataManager.save()
                 Task {
                     await appEnvironment.cloudKitSync.flushPendingChanges()
+                    // The progress save above is what enqueues the server-history
+                    // post, so the flush is created after it — and both finish
+                    // before the assertion is given up.
+                    await appEnvironment.watchHistorySync.flushPending()
                     if backgroundTask != .invalid {
+                        LoggingService.shared.info("Background task PersistOnBackground finished", category: .diagnostics)
                         UIApplication.shared.endBackgroundTask(backgroundTask)
                         backgroundTask = .invalid
                     }
@@ -387,6 +377,9 @@ struct YatteeApp: App {
                 #else
                 Task {
                     await appEnvironment.cloudKitSync.flushPendingChanges()
+                    // The progress save above is what enqueues the server-history
+                    // post, so the flush is created after it.
+                    await appEnvironment.watchHistorySync.flushPending()
                 }
                 #endif
             }
@@ -411,6 +404,39 @@ struct YatteeApp: App {
             #endif
         }
         #endif
+    }
+
+    /// The part of foreground activation that has to happen in order.
+    ///
+    /// Every step here decides what the next one is allowed to see, so these
+    /// run as one sequence rather than as tasks racing each other:
+    ///
+    /// 1. The identity names whose accounts and credentials are in play at all.
+    /// 2. The status refresh says which of those this device can actually use.
+    /// 3. Only then may a tombstone move the selection — the repair prefers a
+    ///    signed-in login on the same server, and a sibling whose status is
+    ///    still being determined is one it would skip, landing on local
+    ///    instead. The repair commits, so there is no second chance at it.
+    /// 4. The fetch goes last for the same reason: a deletion it delivers
+    ///    repairs the context as it applies, off the statuses read above.
+    private func resumeAccountState() async {
+        // Retry a credential identity scope that never resolved (e.g.
+        // launched offline) - account credentials stay unavailable until it does
+        await appEnvironment.credentialIdentityScope.resolveIfNeeded()
+
+        // A credential can arrive over iCloud Keychain without the
+        // scope moving, so statuses are recomputed unconditionally.
+        appEnvironment.refreshAccountStatuses()
+
+        // Repair a context whose account was deleted on another device
+        // while this one was in the background. Only a deletion moves
+        // it — an account that merely has not synced yet is left alone.
+        appEnvironment.dataContextValidator.correctIfContextRemoved()
+
+        SubscriptionFeedCache.shared.warmIfNeeded(using: appEnvironment)
+
+        // Fetch remote CloudKit changes (catches missed push notifications)
+        await appEnvironment.cloudKitSync.fetchRemoteChanges()
     }
 
     private func registerBackgroundTasksIfNeeded() {
@@ -523,6 +549,15 @@ struct YatteeApp: App {
         appEnvironment.navigationCoordinator.navigate(to: destination)
     }
 
+    /// Tell the user an incoming link couldn't be opened instead of failing silently.
+    private func reportUnhandledDeepLink(_ url: URL) {
+        LoggingService.shared.warning("Deep link not handled: \(url.absoluteString)", category: .general)
+        appEnvironment.toastManager.showError(
+            String(localized: "deepLink.unsupported.title", defaultValue: "Can't open link"),
+            subtitle: url.absoluteString
+        )
+    }
+
     /// Handle a link tapped inside a video description.
     /// Video URLs that would interrupt active playback surface the queue sheet;
     /// everything else reuses the standard deep-link pipeline.
@@ -569,7 +604,8 @@ struct YatteeApp: App {
                 instance: instance
             )
             appEnvironment.toastManager.dismiss(id: toastID)
-            appEnvironment.navigationCoordinator.descriptionLinkQueueSheetVideo = video
+            // The top-most sheet host (the player when expanded) presents it
+            appEnvironment.navigationCoordinator.presenter.present(.queueAction(video))
         } catch {
             appEnvironment.toastManager.dismiss(id: toastID)
             appEnvironment.navigationCoordinator.navigate(to: .video(.id(videoID)))
@@ -583,7 +619,7 @@ struct YatteeApp: App {
         case .open:
             // Play directly (existing behavior)
             Task {
-                await playVideoFromDeepLink(videoID: videoID, startTime: startTime)
+                await playVideoFromDeepLink(videoID: videoID, url: originalURL, startTime: startTime)
             }
 
         case .download:
@@ -595,13 +631,15 @@ struct YatteeApp: App {
             #else
             // tvOS doesn't support downloads, fall back to open
             Task {
-                await playVideoFromDeepLink(videoID: videoID, startTime: startTime)
+                await playVideoFromDeepLink(videoID: videoID, url: originalURL, startTime: startTime)
             }
             #endif
 
         case .ask:
-            // Show OpenLinkSheet with URL pre-filled
-            showOpenLinkSheetWithURL(originalURL)
+            // Show the video's details page, carrying the link's timestamp
+            Task {
+                await showLinkDetails(originalURL, fallback: .video(.id(videoID)))
+            }
         }
     }
 
@@ -624,18 +662,46 @@ struct YatteeApp: App {
             #endif
 
         case .ask:
-            // Show OpenLinkSheet with URL pre-filled
-            showOpenLinkSheetWithURL(externalURL)
+            // Extract, then show the video's details page
+            Task {
+                await showLinkDetails(externalURL, fallback: .externalVideo(externalURL))
+            }
         }
     }
 
-    /// Show OpenLinkSheet with a pre-filled URL.
-    private func showOpenLinkSheetWithURL(_ url: URL) {
-        prefilledLinkURL = url
+    /// Load a link's video and show its details page. On failure, `fallback`
+    /// (a screen that loads the link itself) shows the error.
+    private func showLinkDetails(_ url: URL, fallback: NavigationDestination) async {
+        // A watch link inside a playlist shows both, as Open Link's Load does
+        if URLRouter().youTubePlaylistContext(url) != nil {
+            appEnvironment.navigationCoordinator.navigateToOpenedLink(.openedLinks([url]))
+            return
+        }
+
+        let toastID = appEnvironment.toastManager.show(
+            scopes: [.main, .player],
+            category: .loading,
+            title: String(localized: "deepLink.loading.title", defaultValue: "Loading video…"),
+            subtitle: url.host,
+            autoDismissDelay: 60.0
+        )
+
+        let destination: NavigationDestination
+        do {
+            destination = try await LinkVideoResolver(appEnvironment: appEnvironment).resolveDestination(url)
+        } catch {
+            LoggingService.shared.warning(
+                "Deep link details: failed to load \(url.absoluteString): \(error.localizedDescription)",
+                category: .general
+            )
+            destination = fallback
+        }
+        appEnvironment.toastManager.dismiss(id: toastID)
+        appEnvironment.navigationCoordinator.navigateToOpenedLink(destination)
     }
 
     /// Play a video from a deep link.
-    private func playVideoFromDeepLink(videoID: VideoID, startTime: TimeInterval? = nil) async {
+    private func playVideoFromDeepLink(videoID: VideoID, url: URL? = nil, startTime: TimeInterval? = nil) async {
         LoggingService.shared.info(
             "Deep link play: videoID=\(videoID.videoID) source=\(videoID.source) startTime=\(startTime ?? -1)",
             category: .general
@@ -673,8 +739,9 @@ struct YatteeApp: App {
                 instance: instance
             )
             LoggingService.shared.info("Deep link play: fetched video, opening player", category: .general)
+            // A watch link inside a playlist queues the playlist around it
+            await LinkVideoResolver(appEnvironment: appEnvironment).play(video, from: url, startTime: startTime)
             appEnvironment.toastManager.dismiss(id: toastID)
-            appEnvironment.playerService.openVideo(video, startTime: startTime, forceStartTime: startTime != nil)
         } catch {
             LoggingService.shared.error(
                 "Deep link play: video fetch failed (\(error.localizedDescription)), falling back to info view",
@@ -699,10 +766,7 @@ struct YatteeApp: App {
                 )
 
             await MainActor.run {
-                deepLinkVideo = video
-                deepLinkStreams = streams
-                deepLinkCaptions = captions
-                showingDeepLinkDownloadSheet = true
+                appEnvironment.navigationCoordinator.presenter.present(.downloadOptions(video, streams: streams, captions: captions))
             }
         } catch {
             // Fall back to open on error
@@ -712,6 +776,16 @@ struct YatteeApp: App {
 
     /// Download an external video from a deep link.
     private func downloadExternalVideoFromDeepLink(url: URL) async {
+        // A file mpv plays as-is can be downloaded straight from its URL
+        if let probe = await DirectMediaProbe.probe(url) {
+            let video = DirectMediaHelper.createVideo(from: url, probe: probe)
+            let stream = DirectMediaHelper.createStream(from: url, probe: probe)
+            await MainActor.run {
+                appEnvironment.navigationCoordinator.presenter.present(.downloadOptions(video, streams: [stream], captions: []))
+            }
+            return
+        }
+
         guard let instance = appEnvironment.instancesManager.yatteeServerInstance else {
             // No Yattee Server - fall back to open
             appEnvironment.navigationCoordinator.navigate(to: .externalVideo(url))
@@ -723,10 +797,7 @@ struct YatteeApp: App {
                 .extractURL(url, instance: instance)
 
             await MainActor.run {
-                deepLinkVideo = video
-                deepLinkStreams = streams
-                deepLinkCaptions = captions
-                showingDeepLinkDownloadSheet = true
+                appEnvironment.navigationCoordinator.presenter.present(.downloadOptions(video, streams: streams, captions: captions))
             }
         } catch {
             // Fall back to open on error

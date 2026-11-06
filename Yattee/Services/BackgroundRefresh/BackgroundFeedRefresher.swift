@@ -41,14 +41,34 @@ final class BackgroundFeedRefresher {
             return
         }
 
-        // Route based on subscription account type
-        switch appEnvironment.settingsManager.subscriptionAccount.type {
+        // Route on the *effective* context. An account context resolves its own
+        // instance, so a second login on the same instance refreshes the right
+        // user's feed — but an account whose instance is switched off or whose
+        // credential has not arrived falls back to local rather than sending
+        // background requests to a server the user is not currently using.
+        switch appEnvironment.dataContextValidator.effectiveContext {
         case .local:
             await performLocalAccountRefresh()
-        case .invidious:
-            await performInvidiousAccountRefresh()
-        case .piped:
-            await performPipedAccountRefresh()
+        case let .account(id):
+            guard let account = appEnvironment.accountsManager.account(id: id),
+                  let instance = appEnvironment.accountsManager.instance(for: account)
+            else {
+                LoggingService.shared.debug(
+                    "Background refresh skipped: selected account has no resolved instance",
+                    category: .notifications
+                )
+                return
+            }
+
+            switch instance.type {
+            case .invidious: await performInvidiousAccountRefresh()
+            case .piped: await performPipedAccountRefresh()
+            default:
+                LoggingService.shared.debug(
+                    "Background refresh not supported for this account type",
+                    category: .notifications
+                )
+            }
         }
     }
 
@@ -169,10 +189,12 @@ final class BackgroundFeedRefresher {
     private func performInvidiousAccountRefresh() async {
         guard let appEnvironment else { return }
 
-        // Require authenticated Invidious instance
-        guard let invidiousInstance = appEnvironment.instancesManager.instances
-            .first(where: { $0.type == .invidious && $0.isEnabled }),
-              let sid = appEnvironment.invidiousCredentialsManager.sid(for: invidiousInstance) else {
+        // Resolve through the selected account: a fresh login writes only the
+        // account-scoped Keychain key, and "first enabled Invidious instance"
+        // could pick a server this account has no credential for.
+        guard let account = appEnvironment.account(forSelectedContext: .invidious),
+              let invidiousInstance = appEnvironment.accountsManager.instance(for: account),
+              let sid = appEnvironment.accountCredentialsManager(for: account)?.credential(for: account) else {
             LoggingService.shared.debug("Background refresh requires authenticated Invidious instance", category: .notifications)
             return
         }
@@ -274,11 +296,9 @@ final class BackgroundFeedRefresher {
     private func performPipedAccountRefresh() async {
         guard let appEnvironment else { return }
 
-        // Get the instance ID from subscription account settings
-        let account = appEnvironment.settingsManager.subscriptionAccount
-        guard let instanceID = account.instanceID,
-              let pipedInstance = appEnvironment.instancesManager.instances.first(where: { $0.id == instanceID }),
-              let authToken = appEnvironment.pipedCredentialsManager.credential(for: pipedInstance) else {
+        guard let account = appEnvironment.account(forSelectedContext: .piped),
+              let pipedInstance = appEnvironment.accountsManager.instance(for: account),
+              let authToken = appEnvironment.accountCredentialsManager(for: account)?.credential(for: account) else {
             LoggingService.shared.debug("Background refresh requires authenticated Piped instance", category: .notifications)
             return
         }
@@ -303,8 +323,10 @@ final class BackgroundFeedRefresher {
 
         do {
             // Fetch the Piped feed
-            let pipedAPI = PipedAPI(httpClient: appEnvironment.httpClient)
-            let feedVideos = try await pipedAPI.feed(instance: pipedInstance, authToken: authToken)
+            let feedVideos = try await appEnvironment.contentService.feed(
+                for: pipedInstance,
+                credential: authToken
+            )
 
             LoggingService.shared.debug("API returned \(feedVideos.count) total videos", category: .notifications)
 

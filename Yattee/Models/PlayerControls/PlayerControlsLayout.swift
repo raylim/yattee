@@ -33,9 +33,8 @@ struct PlayerControlsLayout: Codable, Hashable, Sendable {
     /// Mini player settings. Optional for backward compatibility.
     var miniPlayerSettings: MiniPlayerSettings?
 
-    /// Wide layout panel alignment. Optional for backward compatibility.
-    /// When nil, uses the global setting from SettingsManager.
-    var wideLayoutPanelAlignment: FloatingPanelSide?
+    /// Details panel pages configuration. Optional for backward compatibility.
+    var panelSettings: PanelSettings?
 
 
     // MARK: - Initialization
@@ -58,7 +57,8 @@ struct PlayerControlsLayout: Codable, Hashable, Sendable {
         progressBarSettings: ProgressBarSettings = .default,
         gesturesSettings: GesturesSettings? = nil,
         playerPillSettings: PlayerPillSettings? = nil,
-        miniPlayerSettings: MiniPlayerSettings? = nil
+        miniPlayerSettings: MiniPlayerSettings? = nil,
+        panelSettings: PanelSettings? = nil
     ) {
         self.topSection = topSection
         self.centerSettings = centerSettings
@@ -68,6 +68,7 @@ struct PlayerControlsLayout: Codable, Hashable, Sendable {
         self.gesturesSettings = gesturesSettings
         self.playerPillSettings = playerPillSettings
         self.miniPlayerSettings = miniPlayerSettings
+        self.panelSettings = panelSettings
     }
 
     // MARK: - Gesture Settings
@@ -91,14 +92,30 @@ struct PlayerControlsLayout: Codable, Hashable, Sendable {
         miniPlayerSettings ?? .default
     }
 
-    // MARK: - Wide Layout Panel Settings
+    // MARK: - Panel Settings
 
-    /// Returns the effective wide layout panel alignment, using right as default if not set.
-    var effectiveWideLayoutPanelAlignment: FloatingPanelSide {
-        wideLayoutPanelAlignment ?? .left
+    /// Returns the effective details panel settings, using defaults if not set.
+    /// Migrates the legacy comments pill mode (once stored on the player pill
+    /// settings) into the comments page settings; the migrated value persists
+    /// the first time the panel settings are edited and saved.
+    var effectivePanelSettings: PanelSettings {
+        var settings = panelSettings ?? .default
+        if let legacyMode = playerPillSettings?.commentsPillMode,
+           settings.configuration(for: .comments)?.commentsSettings.pillMode == nil {
+            var comments = settings.configuration(for: .comments)?.commentsSettings ?? CommentsPageSettings()
+            comments.pillMode = legacyMode
+            settings.updateSettings(.comments(comments), for: .comments)
+        }
+        return settings
     }
 
     // MARK: - Defaults
+
+    /// Last loaded active layout — lets the expanded player seed its layout
+    /// state synchronously before the async load, so the first frames resolve
+    /// the correct layout (e.g. corner mode) instead of flashing the default.
+    /// Warmed at app start and kept fresh by the expanded player's loads.
+    nonisolated(unsafe) static var cached: PlayerControlsLayout = .default
 
     /// Default layout matching the current hardcoded player controls.
     static let `default`: PlayerControlsLayout = {

@@ -63,6 +63,10 @@ final class DownloadManager: NSObject {
     let minimumValidFileSize: Int64 = 1024  // 1 KB
 
     var urlSession: URLSession!
+    /// Callers waiting for a replaced background session to finish invalidating,
+    /// keyed by session. A new session with the same identifier must not be
+    /// created while the old one is still alive.
+    var sessionInvalidationWaiters: [ObjectIdentifier: CheckedContinuation<Void, Never>] = [:]
     /// Tracks video download tasks by download ID
     var videoTasks: [UUID: URLSessionDownloadTask] = [:]
     /// Tracks audio download tasks by download ID
@@ -105,11 +109,12 @@ final class DownloadManager: NSObject {
     override init() {
         super.init()
         loadDownloads()
+        excludeExistingDownloadsFromBackupIfNeeded()
         // Note: Session setup and resumeInterruptedDownloads are deferred to setDownloadSettings()
         // to ensure we have the correct cellular access setting before creating the session.
     }
 
-    private func setupSession() {
+    func setupSession() {
         let config = URLSessionConfiguration.background(
             withIdentifier: AppIdentifiers.downloadSession
         )
@@ -192,8 +197,14 @@ final class DownloadManager: NSObject {
         }
 
         // 3. Invalidate the old session (use finishTasksAndInvalidate since downloads are already paused)
-        urlSession?.finishTasksAndInvalidate()
-        urlSession = nil
+        //    and wait for it to go away: a background session created with the same identifier
+        //    while the old one is still invalidating hands out tasks that throw "Task created in
+        //    a session that has been invalidated" (#975).
+        if let oldSession = urlSession {
+            urlSession = nil
+            oldSession.finishTasksAndInvalidate()
+            await waitForInvalidation(of: oldSession)
+        }
 
         // 4. Create new session with updated cellular config
         setupSession()
@@ -216,6 +227,36 @@ final class DownloadManager: NSObject {
         await startNextDownloadIfNeeded()
     }
     #endif
+
+    /// Suspends until the delegate reports `session` invalidated, or a timeout passes.
+    private func waitForInvalidation(of session: URLSession, timeout: TimeInterval = 5) async {
+        let key = ObjectIdentifier(session)
+        await withCheckedContinuation { continuation in
+            sessionInvalidationWaiters[key] = continuation
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard let waiter = self?.sessionInvalidationWaiters.removeValue(forKey: key) else { return }
+                LoggingService.shared.logDownload("[Downloads] Session invalidation timed out, continuing")
+                waiter.resume()
+            }
+        }
+    }
+
+    /// Called from the URLSession delegate when a session becomes invalid.
+    func handleSessionInvalidated(_ session: URLSession, error: Error?) {
+        LoggingService.shared.logDownload(
+            "[Downloads] Session invalidated",
+            details: "current: \(session === urlSession), error: \(error?.localizedDescription ?? "none")"
+        )
+        sessionInvalidationWaiters.removeValue(forKey: ObjectIdentifier(session))?.resume()
+
+        // The live session died without us replacing it; build a fresh one so
+        // new downloads don't keep failing until the app is relaunched.
+        if session === urlSession {
+            urlSession = nil
+            setupSession()
+        }
+    }
 
     // MARK: - Auto Download
 
@@ -865,20 +906,6 @@ final class DownloadManager: NSObject {
 
     // MARK: - Batch Operations
 
-    /// Pause all active downloads.
-    func pauseAll() async {
-        for download in activeDownloads where download.status == .downloading {
-            await pause(download)
-        }
-    }
-
-    /// Resume all paused downloads.
-    func resumeAll() async {
-        for download in activeDownloads where download.status == .paused {
-            await resume(download)
-        }
-    }
-
     /// Delete all completed downloads.
     func deleteAllCompleted() async {
         for download in completedDownloads {
@@ -1023,16 +1050,6 @@ final class DownloadManager: NSObject {
         return (video, stream, audioStream, captionURL, download.dislikeCount)
     }
 
-    /// Creates a Video and Stream for playing a downloaded video by video ID.
-    /// Returns nil if the video is not downloaded or the file doesn't exist.
-    /// Also returns the stored dislike count, audio stream, and caption URL if available.
-    func videoAndStream(for videoID: VideoID) -> (video: Video, stream: Stream, audioStream: Stream?, captionURL: URL?, dislikeCount: Int?)? {
-        guard let download = completedDownloads.first(where: { $0.videoID == videoID }) else {
-            return nil
-        }
-        return videoAndStream(for: download)
-    }
-
     // MARK: - Private Helpers
 
     func sortQueue() {
@@ -1058,8 +1075,54 @@ final class DownloadManager: NSObject {
         if !fileManager.fileExists(atPath: downloadsURL.path) {
             try? fileManager.createDirectory(at: downloadsURL, withIntermediateDirectories: true)
         }
+        // Downloaded media is re-downloadable and can be large; keep it out of iCloud/device backups.
+        // Excluding the directory excludes everything inside it. Applied on every launch so
+        // directories created by earlier versions get the flag too.
+        var excludedURL = downloadsURL
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? excludedURL.setResourceValues(values)
         Self._cachedDownloadsDirectory = downloadsURL
         return downloadsURL
+    }
+
+    private static let backupExclusionMigrationKey = "downloadsBackupExclusionMigrated"
+
+    /// One-time migration: flags every file already in the downloads directory as excluded
+    /// from iCloud/device backups. Downloads made by earlier versions were backed up.
+    private func excludeExistingDownloadsFromBackupIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.backupExclusionMigrationKey) else { return }
+        let directory = downloadsDirectory()
+
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            var flagged = 0
+            var failed = 0
+            if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isExcludedFromBackupKey]) {
+                for case var url as URL in enumerator {
+                    if (try? url.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup == true {
+                        continue
+                    }
+                    var values = URLResourceValues()
+                    values.isExcludedFromBackup = true
+                    do {
+                        try url.setResourceValues(values)
+                        flagged += 1
+                    } catch {
+                        failed += 1
+                    }
+                }
+            }
+
+            LoggingService.shared.logDownload(
+                "[Downloads] Backup exclusion migration",
+                details: "flagged: \(flagged), failed: \(failed)"
+            )
+            // Retry on next launch if anything failed.
+            if failed == 0 {
+                UserDefaults.standard.set(true, forKey: DownloadManager.backupExclusionMigrationKey)
+            }
+        }
     }
 
     // MARK: - Media Source Download Helpers
@@ -1179,36 +1242,12 @@ final class DownloadManager {
     private(set) var storageUsed: Int64 = 0
     var maxConcurrentDownloads: Int { 2 }
 
-    func enqueue(_ video: Video, quality: String, formatID: String, streamURL: URL, audioStreamURL: URL? = nil, captionURL: URL? = nil, audioLanguage: String? = nil, captionLanguage: String? = nil, httpHeaders: [String: String]? = nil, storyboard: Storyboard? = nil, dislikeCount: Int? = nil, priority: DownloadPriority = .normal, videoCodec: String? = nil, audioCodec: String? = nil, videoBitrate: Int? = nil, audioBitrate: Int? = nil, suppressStartToast: Bool = false) async throws {
-        throw DownloadError.notSupported
-    }
-
-    func autoEnqueue(_ video: Video, preferredQuality: DownloadQuality, preferredAudioLanguage: String?, preferredSubtitlesLanguage: String?, includeSubtitles: Bool, contentService: ContentService, instance: Instance, suppressStartToast: Bool = false) async throws {
-        throw DownloadError.notSupported
-    }
-
-    func autoEnqueueMediaSource(_ video: Video, mediaSourcesManager: MediaSourcesManager, webDAVClient: WebDAVClient, smbClient: SMBClient) async throws {
-        throw DownloadError.notSupported
-    }
-
-    func pause(_ download: Download) async {}
-    func resume(_ download: Download) async {}
-    func cancel(_ download: Download) async {}
-    func delete(_ download: Download) async {}
-    func moveInQueue(_ download: Download, to position: Int) async {}
-    func pauseAll() async {}
-    func resumeAll() async {}
-    func deleteAllCompleted() async {}
-    func calculateStorageUsed() async -> Int64 { 0 }
     func getAvailableStorage() -> Int64 { 0 }
-    func deleteWatchedDownloads(watchedVideoIDs: Set<String>) async {}
     func isDownloaded(_ videoID: VideoID) -> Bool { false }
     func isDownloading(_ videoID: VideoID) -> Bool { false }
     func download(for videoID: VideoID) -> Download? { nil }
     func localURL(for videoID: VideoID) -> URL? { nil }
-    func resolveLocalURL(for download: Download) -> URL? { nil }
     func videoAndStream(for download: Download) -> (video: Video, stream: Stream, audioStream: Stream?, captionURL: URL?, dislikeCount: Int?)? { nil }
-    func videoAndStream(for videoID: VideoID) -> (video: Video, stream: Stream, audioStream: Stream?, captionURL: URL?, dislikeCount: Int?)? { nil }
     func setToastManager(_ manager: ToastManager) {}
     func setDownloadSettings(_ settings: DownloadSettings) {}
     func downloadsDirectory() -> URL { URL(fileURLWithPath: NSTemporaryDirectory()) }

@@ -9,6 +9,8 @@ import SwiftUI
 
 struct InstanceBrowseView: View {
     @Environment(\.appEnvironment) private var appEnvironment
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     let instance: Instance
     let initialTab: BrowseTab?
@@ -26,11 +28,15 @@ struct InstanceBrowseView: View {
     @State private var showFilterSheet = false
 
     // Feed state (for Invidious/Piped login)
+    /// Which login the account-scoped content belongs to, so a page still in
+    /// flight cannot be appended to the next one's feed.
+    @State private var accountContentGeneration = 0
+    /// Which account the displayed — or in-flight — account-scoped content is
+    /// for, so a change of effective account can be noticed at all.
+    @State private var accountContentAccountID: UUID?
     @State private var feedVideos: [Video] = []
     @State private var feedSubscriptions: [Channel] = []
-    
-    // Playlists state (for Invidious login)
-    @State private var userPlaylists: [Playlist] = []
+
     @State private var selectedFeedChannelID: String?
     @State private var isLoggedIn = false
     @State private var feedPage = 1
@@ -44,9 +50,18 @@ struct InstanceBrowseView: View {
     @AppStorage var rowStyle: VideoRowStyle
     @AppStorage var gridColumnCount: Int
     @AppStorage var hideWatched: Bool
+    @AppStorage var hideShorts: Bool
     
     // View options UI state
     @State private var showViewOptions = false
+    @State private var showEditInstance = false
+    @State private var showRemoveConfirmation = false
+
+    // Account actions raised from the three-dots menu. Same shapes as the
+    // edit sheet's accounts section: a nil-account login target means
+    // "create one", and the sign-out is held until its confirmation.
+    @State private var loginTarget: AccountLoginTarget?
+    @State private var pendingSignOut: Account?
     @State private var viewWidth: CGFloat = 0
     @State private var watchEntriesMap: [String: WatchEntry] = [:]
     @State private var hasInitializedTab = false
@@ -60,6 +75,7 @@ struct InstanceBrowseView: View {
         _rowStyle = AppStorage(wrappedValue: .regular, "instanceBrowse.\(instance.id).rowStyle")
         _gridColumnCount = AppStorage(wrappedValue: 2, "instanceBrowse.\(instance.id).gridColumns")
         _hideWatched = AppStorage(wrappedValue: false, "instanceBrowse.\(instance.id).hideWatched")
+        _hideShorts = AppStorage(wrappedValue: false, "instanceBrowse.\(instance.id).hideShorts")
     }
 
     /// List style from centralized settings.
@@ -72,12 +88,6 @@ struct InstanceBrowseView: View {
         appEnvironment?.instancesManager.enabledYatteeServerInstances.first
     }
     private var yatteeServerURL: URL? { yatteeServer?.url }
-
-    /// Auth header for Yattee Server instances (when browsing a Yattee Server directly)
-    private var yatteeServerAuthHeader: String? {
-        guard instance.type == .yatteeServer else { return nil }
-        return appEnvironment?.basicAuthCredentialsManager.basicAuthHeader(for: instance)
-    }
 
     /// Auth header for avatar loading (uses Yattee Server for YouTube channel avatars)
     private var avatarAuthHeader: String? {
@@ -118,8 +128,137 @@ struct InstanceBrowseView: View {
             rowStyle: $rowStyle,
             gridColumns: $gridColumnCount,
             hideWatched: $hideWatched,
+            hideShorts: $hideShorts,
             maxGridColumns: gridConfig.maxColumns
         )
+    }
+
+    /// All accounts on this instance, in the accounts submenu.
+    private var instanceAccounts: [Account] {
+        appEnvironment?.accountsManager.accounts(forInstance: instance.id) ?? []
+    }
+
+    /// The account this screen's authenticated tabs actually use.
+    private var effectiveAccount: Account? {
+        appEnvironment?.account(forInstance: instance)
+    }
+
+    private func accountDisplayName(_ account: Account) -> String {
+        appEnvironment?.dataContextValidator.displayName(for: account) ?? instance.displayName
+    }
+
+    /// Shared content of the three-dots menu: refresh and accounts on top,
+    /// link actions and instance management below, view options last.
+    @ViewBuilder
+    private var instanceMenuContent: some View {
+        Button {
+            Task { await startContentLoad(forceRefresh: true) }
+        } label: {
+            Label(String(localized: "common.refresh"), systemImage: "arrow.clockwise")
+        }
+
+        if instance.supportsAuthentication {
+            Divider()
+            accountsMenuContent
+        }
+
+        #if !os(tvOS)
+        Divider()
+
+        Button {
+            copyInstanceURL()
+        } label: {
+            Label(String(localized: "instance.browse.copyURL"), systemImage: "doc.on.doc")
+        }
+
+        Button {
+            openURL(instance.browseURL)
+        } label: {
+            Label(String(localized: "instance.browse.openInBrowser"), systemImage: "safari")
+        }
+        #endif
+
+        Divider()
+
+        Button {
+            showEditInstance = true
+        } label: {
+            Label(String(localized: "instance.browse.edit \(instance.displayName)"), systemImage: "pencil")
+        }
+
+        Button(role: .destructive) {
+            showRemoveConfirmation = true
+        } label: {
+            Label(String(localized: "instance.browse.remove \(instance.displayName)"), systemImage: "trash")
+        }
+
+        Divider()
+
+        Button {
+            showViewOptions = true
+        } label: {
+            Label(String(localized: "viewOptions.title"), systemImage: "slider.horizontal.3")
+        }
+    }
+
+    /// Sign-in entry when nobody is signed in; otherwise an accounts submenu
+    /// that switches the data context, adds a login, or signs the current one
+    /// out. Switching goes through the global context — the same semantics as
+    /// the switcher — which this view already reacts to.
+    @ViewBuilder
+    private var accountsMenuContent: some View {
+        if instanceAccounts.isEmpty {
+            Button {
+                loginTarget = .newAccount
+            } label: {
+                Label(String(localized: "login.loginToAccount"), systemImage: "person.badge.plus")
+            }
+        } else {
+            Menu {
+                ForEach(instanceAccounts) { account in
+                    Button {
+                        appEnvironment?.switchDataContext(to: .account(account.id))
+                    } label: {
+                        if account.id == effectiveAccount?.id {
+                            Label(accountDisplayName(account), systemImage: "checkmark")
+                        } else {
+                            Text(accountDisplayName(account))
+                        }
+                    }
+                    .disabled(account.id == effectiveAccount?.id)
+                }
+
+                Divider()
+
+                Button {
+                    loginTarget = .newAccount
+                } label: {
+                    Label(String(localized: "accounts.addAccount"), systemImage: "person.badge.plus")
+                }
+
+                if let active = effectiveAccount {
+                    Button(role: .destructive) {
+                        pendingSignOut = active
+                    } label: {
+                        Label(
+                            String(localized: "instance.browse.signOut \(accountDisplayName(active))"),
+                            systemImage: "rectangle.portrait.and.arrow.forward"
+                        )
+                    }
+                }
+            } label: {
+                Label(String(localized: "accounts.title"), systemImage: "person.crop.circle")
+            }
+        }
+    }
+
+    private func copyInstanceURL() {
+        #if os(iOS)
+        UIPasteboard.general.string = instance.browseURL.absoluteString
+        #elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(instance.browseURL.absoluteString, forType: .string)
+        #endif
     }
 
     /// View options button lives on the leading edge on macOS, trailing elsewhere.
@@ -161,10 +300,10 @@ struct InstanceBrowseView: View {
                         tvOSFiltersMenu
                     }
 
-                    Button {
-                        showViewOptions = true
+                    Menu {
+                        instanceMenuContent
                     } label: {
-                        Label(String(localized: "viewOptions.title"), systemImage: "slider.horizontal.3")
+                        Label(String(localized: "common.more"), systemImage: "ellipsis")
                     }
                 }
                 .focusSection()
@@ -341,12 +480,12 @@ struct InstanceBrowseView: View {
         .navigationTitle(instance.displayName)
         .toolbarTitleDisplayMode(.inlineLarge)
         .toolbar {
-            // View options first so it is the leftmost navigation item on macOS.
+            // Instance menu first so it is the leftmost navigation item on macOS.
             ToolbarItem(placement: viewOptionsPlacement) {
-                Button {
-                    showViewOptions = true
+                Menu {
+                    instanceMenuContent
                 } label: {
-                    Label(String(localized: "viewOptions.title"), systemImage: "slider.horizontal.3")
+                    Label(String(localized: "common.more"), systemImage: "ellipsis")
                 }
                 .liquidGlassTransitionSource(id: "instanceBrowseViewOptions", in: sheetTransition)
                 #if os(macOS)
@@ -405,6 +544,57 @@ struct InstanceBrowseView: View {
                 .liquidGlassSheetContent(sourceID: "instanceBrowseViewOptions", in: sheetTransition)
         }
         #endif
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $showEditInstance) {
+            TVSidebarDetailContainer(systemImage: "pencil.circle", title: String(localized: "sources.editSource")) {
+                EditSourceView(source: .remoteServer(instance))
+            }
+            .tvFullScreenCoverBackground()
+        }
+        #else
+        .sheet(isPresented: $showEditInstance) {
+            EditSourceView(source: .remoteServer(instance))
+        }
+        #endif
+        .confirmationDialog(
+            String(localized: "sources.delete.confirmation.single \(instance.displayName)"),
+            isPresented: $showRemoveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "common.delete"), role: .destructive) {
+                appEnvironment?.removeInstance(instance)
+                dismiss()
+            }
+            Button(String(localized: "common.cancel"), role: .cancel) {}
+        } message: {
+            // The same cascade runs from here as from Settings, so the same
+            // logins go with it.
+            if let accounts = InstanceDeletionDisclosure.message(for: instance, in: appEnvironment) {
+                Text(accounts)
+            }
+        }
+        .platformSheet(item: $loginTarget) { target in
+            InstanceLoginView(instance: instance, initialUsername: storedUsername(for: target)) { credential, username in
+                storeLogin(credential: credential, username: username, target: target)
+            }
+        }
+        .confirmationDialog(
+            String(localized: "accounts.remove.confirm.title \(pendingSignOut.map(accountDisplayName) ?? instance.displayName)"),
+            isPresented: Binding(
+                get: { pendingSignOut != nil },
+                set: { if !$0 { pendingSignOut = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "common.remove"), role: .destructive) {
+                confirmSignOut()
+            }
+            Button(String(localized: "common.cancel"), role: .cancel) {
+                pendingSignOut = nil
+            }
+        } message: {
+            Text(String(localized: "accounts.remove.confirm.message"))
+        }
         .task {
             // Initialize search view model
             if let appEnvironment {
@@ -417,10 +607,7 @@ struct InstanceBrowseView: View {
                 )
             }
             
-            // Check login status for instances that support authentication
-            if instance.supportsAuthentication {
-                isLoggedIn = appEnvironment?.credentialsManager(for: instance)?.isLoggedIn(for: instance) ?? false
-            }
+            refreshLoginState()
             
             // Set initial tab only once (not on navigation back)
             if !hasInitializedTab {
@@ -440,6 +627,38 @@ struct InstanceBrowseView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
             loadWatchEntries()
+        }
+        // A credential can arrive over iCloud Keychain, or an account be added,
+        // while this stays on screen — the Feed tab depends on it and would
+        // otherwise stay missing until the view was rebuilt. Either notification
+        // can also move *which* account is effective here: a status change
+        // because the resolution falls back to a sibling login on the same
+        // instance, an add or a remove because it changes what there is to fall
+        // back to. Content loaded for the previous one has to go with it.
+        .onReceive(NotificationCenter.default.publisher(for: .accountStatusesDidChange)) { _ in
+            handleEffectiveAccountChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .accountsDidChange)) { _ in
+            handleEffectiveAccountChange()
+        }
+        // Selecting the other login on this instance changes whose feed and
+        // playlists these are. Nothing else here would notice: the instance,
+        // the tab and the "already has data" shortcut are all unchanged.
+        .onReceive(NotificationCenter.default.publisher(for: .dataContextDidChange)) { _ in
+            discardAccountScopedContent()
+            refreshLoginState()
+            if !resetSelectedTabIfUnavailable() {
+                Task { await startContentLoad() }
+            }
+        }
+        // Same reason, without the context moving: the credential behind this
+        // instance's account was replaced.
+        .onReceive(NotificationCenter.default.publisher(for: .accountCredentialDidChange)) { _ in
+            discardAccountScopedContent()
+            refreshLoginState()
+            if !resetSelectedTabIfUnavailable() {
+                Task { await startContentLoad() }
+            }
         }
         .onChange(of: selectedTab) { _, _ in
             isLoading = true
@@ -562,10 +781,31 @@ struct InstanceBrowseView: View {
         .pickerStyle(.segmented)
     }
 
+    /// The account whose playlists the Playlists tab shows.
+    private var playlistsAccount: Account? {
+        appEnvironment?.account(forInstance: instance)
+    }
+
+    /// The account's playlists, read from the shared cache rather than fetched
+    /// into this view.
+    ///
+    /// Everything that changes a server-side playlist goes through that cache —
+    /// the picker that creates one while adding a video, the detail view that
+    /// renames or deletes one — so reading it is what makes those changes show
+    /// up here. It is keyed by account, which is also the discard on an account
+    /// change: whose playlists these are moves with `playlistsAccount`.
+    private var userPlaylists: [Playlist] {
+        guard let appEnvironment, let account = playlistsAccount else { return [] }
+        return appEnvironment.remotePlaylistsCache.playlists(for: account.id) ?? []
+    }
+
     private var availableTabs: [BrowseTab] {
         if instance.supportsFeed && isLoggedIn {
-            // Playlists tab only available for Invidious (Piped playlists to be added in future)
-            if instance.type == .invidious {
+            // Capabilities decide, never the instance type: a Piped account
+            // reads its playlists through exactly the same service, so the tab
+            // is offered wherever an account can actually fill it.
+            if let account = playlistsAccount,
+               appEnvironment?.accountsManager.capabilities(for: account)?.supportsPlaylistReads == true {
                 return [.feed, .popular, .trending, .playlists]
             }
             return [.feed, .popular, .trending]
@@ -588,6 +828,10 @@ struct InstanceBrowseView: View {
                 guard let entry = watchEntriesMap[video.id.videoID] else { return true }
                 return !entry.isFinished
             }
+        }
+
+        if hideShorts {
+            videos = videos.filter { !$0.isKnownShort }
         }
         
         return videos
@@ -894,7 +1138,12 @@ struct InstanceBrowseView: View {
                     rowStyle: rowStyle,
                     listStyle: listStyle
                 ) {
-                    NavigationLink(value: NavigationDestination.playlist(.remote(playlist.id, instance: instance, title: playlist.title))) {
+                    // These are the account's own playlists, so the detail view
+                    // is told whose they are — that is what lets it fetch them
+                    // authenticated and offer to change them.
+                    NavigationLink(value: NavigationDestination.playlist(
+                        .remote(playlist.id, instance: instance, title: playlist.title, accountID: playlistsAccount?.id)
+                    )) {
                         SearchPlaylistRowView(playlist: playlist, style: rowStyle)
                             .contentShape(Rectangle())
                     }
@@ -909,7 +1158,9 @@ struct InstanceBrowseView: View {
     private var playlistsGridContent: some View {
         VideoGridContent(columns: gridConfig.effectiveColumns) {
             ForEach(userPlaylists) { playlist in
-                NavigationLink(value: NavigationDestination.playlist(.remote(playlist.id, instance: instance, title: playlist.title))) {
+                NavigationLink(value: NavigationDestination.playlist(
+                    .remote(playlist.id, instance: instance, title: playlist.title, accountID: playlistsAccount?.id)
+                )) {
                     PlaylistCardView(playlist: playlist, isCompact: gridConfig.isCompactCards)
                         .contentShape(Rectangle())
                 }
@@ -1173,6 +1424,102 @@ struct InstanceBrowseView: View {
 
     // MARK: - Data Loading
     
+    /// Drops what belonged to the previously selected login.
+    ///
+    /// Public browsing — popular and trending — is unauthenticated and stays.
+    /// The playlists are not listed here either: they are read from the shared
+    /// cache under the account's own id, so they leave with the account.
+    private func discardAccountScopedContent() {
+        accountContentGeneration += 1
+        feedVideos = []
+        feedSubscriptions = []
+        feedPage = 1
+        hasMoreFeedResults = false
+        isLoadingMoreFeed = false
+        // The high-water mark belongs to the discarded feed. Left behind, it
+        // gates pagination against the previous login's count: the next one
+        // would have to exceed a page it never loaded before it could ask for
+        // a second.
+        feedLoadedVideoCount = 0
+        accountContentAccountID = nil
+    }
+
+    /// Drops account-scoped content when the account it belongs to is no longer
+    /// the one this instance resolves to.
+    ///
+    /// - Returns: whether anything was discarded, so the caller can reload.
+    @discardableResult
+    private func discardAccountScopedContentIfAccountChanged() -> Bool {
+        guard let loadedFor = accountContentAccountID, loadedFor != playlistsAccount?.id else {
+            return false
+        }
+
+        discardAccountScopedContent()
+        return true
+    }
+
+    /// Handles a change to which account this instance resolves to, whatever
+    /// moved it: a status, or an account being added or removed.
+    private func handleEffectiveAccountChange() {
+        let accountChanged = discardAccountScopedContentIfAccountChanged()
+        refreshLoginState()
+
+        // Moving off a tab that no longer exists reloads by itself.
+        guard !resetSelectedTabIfUnavailable() else { return }
+
+        if accountChanged {
+            Task { await startContentLoad() }
+        }
+    }
+
+    /// Moves off a tab that has just stopped being offered.
+    ///
+    /// The Feed and Playlists tabs exist only while an account backs them. When
+    /// one goes away the picker drops it, and a selection left pointing at it
+    /// leaves an unhighlighted tab strip over content nobody can reach.
+    ///
+    /// - Returns: whether the selection moved, which reloads through
+    ///   `onChange(of: selectedTab)`.
+    @discardableResult
+    private func resetSelectedTabIfUnavailable() -> Bool {
+        let tabs = availableTabs
+        guard !tabs.contains(selectedTab), let first = tabs.first else { return false }
+
+        selectedTab = first
+        return true
+    }
+
+    private func refreshLoginState() {
+        guard instance.supportsAuthentication else { return }
+        isLoggedIn = appEnvironment?.isSignedIn(to: instance) ?? false
+    }
+
+    /// Files a successful login against an account, mirroring the edit sheet.
+    @discardableResult
+    private func storeLogin(credential: String, username: String, target: AccountLoginTarget) -> Bool {
+        guard let appEnvironment else { return false }
+        return AccountSignInHandler(appEnvironment: appEnvironment, instance: instance)
+            .storeLogin(credential: credential, username: username, target: target)
+    }
+
+    /// The identifier an existing account last signed in with, when this device
+    /// holds it. A new account has nobody to name yet.
+    private func storedUsername(for target: AccountLoginTarget) -> String? {
+        guard let account = target.account else { return nil }
+        return appEnvironment?.accountCredentialsManager(for: account)?.username(for: account)
+    }
+
+    private func confirmSignOut() {
+        guard let appEnvironment, let account = pendingSignOut else { return }
+        defer { pendingSignOut = nil }
+
+        // Re-resolved rather than trusted: the dialog can outlive the account,
+        // which another device may have deleted while it was up.
+        guard let account = appEnvironment.accountsManager.account(id: account.id) else { return }
+
+        appEnvironment.signOutAndRemoveAccount(account)
+    }
+
     private func loadWatchEntries() {
         watchEntriesMap = appEnvironment?.dataManager.watchEntriesMap() ?? [:]
     }
@@ -1200,7 +1547,9 @@ struct InstanceBrowseView: View {
         case .popular: hasData = !popularVideos.isEmpty
         case .trending: hasData = !trendingVideos.isEmpty
         case .feed: hasData = !feedVideos.isEmpty
-        case .playlists: hasData = !userPlaylists.isEmpty
+        // Never skipped: the list is a cache other screens change, and what was
+        // already fetched stays on screen while it is refetched.
+        case .playlists: hasData = false
         }
 
         if hasData && !forceRefresh {
@@ -1210,6 +1559,20 @@ struct InstanceBrowseView: View {
 
         isLoading = !hasData  // Only show loading spinner when no existing data
         errorMessage = nil
+
+        // Which login the account-scoped tabs are being loaded for. Cancelling
+        // the previous task is not enough on its own: a request that already
+        // came back races the cancellation, and its results would be installed
+        // after the purge that was meant to remove them. Popular and trending
+        // are unauthenticated and deliberately not fenced.
+        let generation = accountContentGeneration
+
+        // Recorded before the request goes out, not after it lands: an account
+        // change while the fetch is in flight has to be able to see whose fetch
+        // it was.
+        if selectedTab == .feed || selectedTab == .playlists {
+            accountContentAccountID = playlistsAccount?.id
+        }
 
         do {
             switch selectedTab {
@@ -1222,7 +1585,7 @@ struct InstanceBrowseView: View {
                 trendingVideos = videos
                 prefetchBranding(for: videos)
             case .feed:
-                guard let credential = appEnvironment.credentialsManager(for: instance)?.credential(for: instance) else {
+                guard let credential = appEnvironment.credential(forInstance: instance) else {
                     errorMessage = String(localized: "feed.error.notLoggedIn")
                     isLoading = false
                     return
@@ -1238,43 +1601,39 @@ struct InstanceBrowseView: View {
                 // Load subscriptions and feed based on instance type
                 let subscriptionChannels: [Channel]
                 let videos: [Video]
+                let hasMore: Bool
+
+                let contentService = appEnvironment.contentService
 
                 switch instance.type {
                 case .invidious:
-                    let api = InvidiousAPI(httpClient: appEnvironment.httpClient)
-
                     // Load subscriptions for channel filter
-                    async let subscriptionsTask = api.subscriptions(instance: instance, sid: credential)
+                    async let subscriptionsTask = contentService.subscriptions(for: instance, credential: credential)
 
                     // Load feed
-                    async let feedTask = api.feed(instance: instance, sid: credential, page: feedPage)
+                    async let feedTask = contentService.feed(for: instance, credential: credential, page: feedPage)
 
                     let (subscriptions, feedResponse) = try await (subscriptionsTask, feedTask)
 
                     // Fetch channel thumbnails in parallel (subscriptions API doesn't include them)
-                    let enrichedSubscriptions = await fetchChannelThumbnails(
+                    subscriptionChannels = await fetchChannelThumbnails(
                         for: subscriptions,
-                        instance: instance,
-                        api: api
+                        instance: instance
                     )
-
-                    subscriptionChannels = enrichedSubscriptions.map { $0.toChannel(baseURL: instance.url) }
                     videos = feedResponse.videos
-                    hasMoreFeedResults = feedResponse.hasMore
+                    hasMore = feedResponse.hasMore
 
                 case .piped:
-                    let api = PipedAPI(httpClient: appEnvironment.httpClient)
-
                     // Load subscriptions and feed in parallel
-                    async let subscriptionsTask = api.subscriptions(instance: instance, authToken: credential)
-                    async let feedTask = api.feed(instance: instance, authToken: credential)
+                    async let subscriptionsTask = contentService.subscriptions(for: instance, credential: credential)
+                    async let feedTask = contentService.feed(for: instance, credential: credential)
 
                     let (pipedSubscriptions, feedVideos) = try await (subscriptionsTask, feedTask)
 
-                    subscriptionChannels = pipedSubscriptions.map { $0.toChannel() }
+                    subscriptionChannels = pipedSubscriptions
                     videos = feedVideos
                     // Piped doesn't support pagination for feed
-                    hasMoreFeedResults = false
+                    hasMore = false
 
                 default:
                     errorMessage = String(localized: "feed.error.notSupported")
@@ -1282,26 +1641,25 @@ struct InstanceBrowseView: View {
                     return
                 }
 
+                guard generation == accountContentGeneration else { return }
+
+                hasMoreFeedResults = hasMore
                 feedSubscriptions = subscriptionChannels.map { $0.enrichedThumbnail(using: appEnvironment.dataManager) }
                 feedVideos = videos
                 prefetchBranding(for: videos)
             case .playlists:
-                // Playlists are currently only supported for Invidious
-                guard instance.type == .invidious else {
-                    errorMessage = String(localized: "feed.error.notSupported")
-                    isLoading = false
-                    return
-                }
-
-                guard let credential = appEnvironment.credentialsManager(for: instance)?.credential(for: instance) else {
+                // Addressed by account rather than by instance and secret: the
+                // cache resolves the credential through the service, and refuses
+                // backends that cannot list playlists at all. Nothing is stored
+                // here — the rows are read back out of the cache, which is what
+                // lets a playlist created or deleted elsewhere show up.
+                guard let account = playlistsAccount else {
                     errorMessage = String(localized: "feed.error.notLoggedIn")
                     isLoading = false
                     return
                 }
 
-                let api = InvidiousAPI(httpClient: appEnvironment.httpClient)
-                let playlists = try await api.userPlaylists(instance: instance, sid: credential)
-                userPlaylists = playlists
+                try await appEnvironment.remotePlaylistsCache.refreshList(for: account)
             }
         } catch is CancellationError {
             // Task was cancelled — another load is taking over, don't touch state
@@ -1328,36 +1686,36 @@ struct InstanceBrowseView: View {
     /// Fetches channel thumbnails for subscriptions, using cache when available.
     /// Only fetches from network for channels not already cached.
     private func fetchChannelThumbnails(
-        for subscriptions: [InvidiousSubscription],
-        instance: Instance,
-        api: InvidiousAPI
-    ) async -> [InvidiousSubscription] {
-        guard let credentialsManager = appEnvironment?.invidiousCredentialsManager else {
-            return subscriptions
-        }
+        for subscriptions: [Channel],
+        instance: Instance
+    ) async -> [Channel] {
+        guard let appEnvironment else { return subscriptions }
+        let credentialsManager = appEnvironment.invidiousCredentialsManager
+        let contentService = appEnvironment.contentService
 
         // Build initial thumbnail map from cache
         var thumbnailMap: [String: URL] = [:]
         for subscription in subscriptions {
-            if let cachedURL = credentialsManager.thumbnailURL(forChannelID: subscription.authorId) {
-                thumbnailMap[subscription.authorId] = cachedURL
+            if let cachedURL = credentialsManager.thumbnailURL(forChannelID: subscription.id.channelID) {
+                thumbnailMap[subscription.id.channelID] = cachedURL
             }
         }
 
         // Find channels that need fetching
-        let allChannelIDs = subscriptions.map(\.authorId)
+        let allChannelIDs = subscriptions.map(\.id.channelID)
         let uncachedIDs = Set(credentialsManager.uncachedChannelIDs(from: allChannelIDs))
 
         // Fetch only uncached channels in parallel
         if !uncachedIDs.isEmpty {
             let fetchedThumbnails = await withTaskGroup(of: (String, URL?).self) { group in
-                for subscription in subscriptions where uncachedIDs.contains(subscription.authorId) {
+                for subscription in subscriptions where uncachedIDs.contains(subscription.id.channelID) {
+                    let channelID = subscription.id.channelID
                     group.addTask {
                         do {
-                            let channel = try await api.channel(id: subscription.authorId, instance: instance)
-                            return (subscription.authorId, channel.thumbnailURL)
+                            let channel = try await contentService.channel(id: channelID, instance: instance)
+                            return (channelID, channel.thumbnailURL)
                         } catch {
-                            return (subscription.authorId, nil)
+                            return (channelID, nil)
                         }
                     }
                 }
@@ -1382,29 +1740,52 @@ struct InstanceBrowseView: View {
             }
         }
 
-        // Create enriched subscriptions with thumbnails
+        // Create enriched subscriptions with thumbnails. A fetched or cached
+        // avatar wins over whatever the subscriptions listing carried, which is
+        // the precedence the Invidious subscription conversion applied when this
+        // ran over the raw listing.
         return subscriptions.map { subscription in
-            var enriched = subscription
-            enriched.thumbnailURL = thumbnailMap[subscription.authorId]
-            return enriched
+            guard let thumbnailURL = thumbnailMap[subscription.id.channelID] else {
+                return subscription
+            }
+            return Channel(
+                id: subscription.id,
+                name: subscription.name,
+                description: subscription.description,
+                subscriberCount: subscription.subscriberCount,
+                videoCount: subscription.videoCount,
+                thumbnailURL: thumbnailURL,
+                bannerURL: subscription.bannerURL,
+                isVerified: subscription.isVerified
+            )
         }
     }
 
     private func loadMoreFeedResults() {
         guard hasMoreFeedResults, !isLoadingMoreFeed, !isLoading else { return }
         guard let appEnvironment,
-              let sid = appEnvironment.invidiousCredentialsManager.sid(for: instance) else { return }
+              let sid = appEnvironment.credential(forInstance: instance) else { return }
 
         isLoadingMoreFeed = true
         feedLoadedVideoCount = feedVideos.count  // Mark current count to prevent re-triggering
         feedPage += 1
 
+        // The login can change while this page is in flight, and appending
+        // afterwards would mix one account's private videos into another's
+        // feed.
+        let generation = accountContentGeneration
+
         Task {
             do {
-                let api = InvidiousAPI(httpClient: appEnvironment.httpClient)
-                let feedResponse = try await api.feed(instance: instance, sid: sid, page: feedPage)
+                let feedResponse = try await appEnvironment.contentService.feed(
+                    for: instance,
+                    credential: sid,
+                    page: feedPage
+                )
 
                 await MainActor.run {
+                    guard generation == accountContentGeneration else { return }
+
                     feedVideos.append(contentsOf: feedResponse.videos)
                     hasMoreFeedResults = feedResponse.hasMore
                     isLoadingMoreFeed = false

@@ -16,6 +16,9 @@ actor PipedAPI: InstanceAPI {
     /// Populated when `channel()` or `channelVideos()` fetches `/channel/{id}`.
     private var channelTabsCache: [String: [PipedChannelTab]] = [:]
 
+    /// `@handle` channel IDs (youtube.com/@name links) resolved to UC… IDs, per instance.
+    private var resolvedChannelHandles: [String: String] = [:]
+
     init(httpClient: HTTPClient) {
         self.httpClient = httpClient
     }
@@ -87,7 +90,24 @@ actor PipedAPI: InstanceAPI {
         return response.toVideo(instanceURL: instance.url, videoId: id)
     }
 
+    /// Piped's `/channel/{id}` only takes UC… IDs; `/c/@handle` resolves a handle.
+    private func channelID(for id: String, instance: Instance) async throws -> String {
+        guard id.hasPrefix("@") else { return id }
+        let key = "\(instance.url.absoluteString)|\(id.lowercased())"
+        if let cached = resolvedChannelHandles[key] { return cached }
+
+        let endpoint = GenericEndpoint.get("/c/\(id)")
+        let response: PipedChannelResponse = try await httpClient.fetch(endpoint, baseURL: instance.url)
+        guard !response.id.isEmpty else { return id }
+        resolvedChannelHandles[key] = response.id
+        if let tabs = response.tabs {
+            channelTabsCache[response.id] = tabs
+        }
+        return response.id
+    }
+
     func channel(id: String, instance: Instance) async throws -> Channel {
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/channel/\(id)")
         let response: PipedChannelResponse = try await httpClient.fetch(endpoint, baseURL: instance.url)
         if let tabs = response.tabs {
@@ -97,6 +117,7 @@ actor PipedAPI: InstanceAPI {
     }
 
     func channelVideos(id: String, instance: Instance, continuation: String?) async throws -> ChannelVideosPage {
+        let id = try await channelID(for: id, instance: instance)
         if let continuation {
             // Fetch next page of channel videos
             let endpoint = GenericEndpoint.get("/nextpage/channel/\(id)", query: ["nextpage": continuation])
@@ -184,7 +205,7 @@ actor PipedAPI: InstanceAPI {
     // MARK: - Channel Tabs
 
     func channelShorts(id: String, instance: Instance, continuation: String?) async throws -> ChannelVideosPage {
-        let page = try await fetchTab(name: "shorts", channelID: id, instance: instance, continuation: continuation)
+        let page = try await fetchTab(name: "shorts", channelID: channelID(for: id, instance: instance), instance: instance, continuation: continuation)
         let videos: [Video] = page.items.compactMap {
             if case .stream(let video) = $0 { return video.toVideo(instanceURL: instance.url) }
             return nil
@@ -193,7 +214,7 @@ actor PipedAPI: InstanceAPI {
     }
 
     func channelStreams(id: String, instance: Instance, continuation: String?) async throws -> ChannelVideosPage {
-        let page = try await fetchTab(name: "livestreams", channelID: id, instance: instance, continuation: continuation)
+        let page = try await fetchTab(name: "livestreams", channelID: channelID(for: id, instance: instance), instance: instance, continuation: continuation)
         let videos: [Video] = page.items.compactMap {
             if case .stream(let video) = $0 { return video.toVideo(instanceURL: instance.url) }
             return nil
@@ -202,7 +223,7 @@ actor PipedAPI: InstanceAPI {
     }
 
     func channelPlaylists(id: String, instance: Instance, continuation: String?) async throws -> ChannelPlaylistsPage {
-        let page = try await fetchTab(name: "playlists", channelID: id, instance: instance, continuation: continuation)
+        let page = try await fetchTab(name: "playlists", channelID: channelID(for: id, instance: instance), instance: instance, continuation: continuation)
         let playlists: [Playlist] = page.items.compactMap {
             if case .playlist(let p) = $0 { return p.toPlaylist() }
             return nil
@@ -325,7 +346,7 @@ actor PipedAPI: InstanceAPI {
         )
 
         // Returns {"message": "ok"} on success
-        let _: PipedMessageResponse = try await httpClient.fetch(endpoint, baseURL: instance.url)
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
     }
 
     /// Unsubscribes from a channel.
@@ -346,7 +367,7 @@ actor PipedAPI: InstanceAPI {
             body: bodyData
         )
 
-        let _: PipedMessageResponse = try await httpClient.fetch(endpoint, baseURL: instance.url)
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
     }
 
     /// Fetches the user's playlists.
@@ -364,13 +385,18 @@ actor PipedAPI: InstanceAPI {
         return response.map { $0.toPlaylist() }
     }
 
-    /// Fetches a user playlist with its videos.
+    /// Fetches a user playlist along with the per-entry identities needed to
+    /// mutate it.
+    ///
+    /// Piped has no per-entry token, so entries are
+    /// addressed by their position in this fetch and are only valid until the
+    /// playlist next changes.
     /// - Parameters:
     ///   - id: The playlist ID (UUID)
     ///   - instance: The Piped instance
     ///   - authToken: The auth token from login
-    /// - Returns: Playlist with videos
-    func userPlaylist(id: String, instance: Instance, authToken: String) async throws -> Playlist {
+    /// - Returns: The playlist plus its addressable entries
+    func userPlaylistSnapshot(id: String, instance: Instance, authToken: String) async throws -> RemotePlaylistSnapshot {
         let headers = ["Authorization": authToken]
         let firstEndpoint = GenericEndpoint(
             path: "/playlists/\(id)",
@@ -397,17 +423,303 @@ actor PipedAPI: InstanceAPI {
             page += 1
         }
 
-        return PipedPlaylistResponse(
-            name: firstResponse.name,
-            description: firstResponse.description,
-            uploader: firstResponse.uploader,
-            uploaderUrl: firstResponse.uploaderUrl,
-            uploaderAvatar: firstResponse.uploaderAvatar,
-            videos: firstResponse.videos,
+        return Self.buildUserPlaylistSnapshot(
+            firstPage: firstResponse,
+            allStreams: allStreams,
+            playlistID: id,
+            instanceURL: instance.url
+        )
+    }
+
+    /// Builds a snapshot from an already-fetched first page plus every stream
+    /// paged in after it.
+    ///
+    /// Pure: the network path and ``userPlaylistSnapshot(fromPageJSON:playlistID:instanceURL:)``
+    /// both funnel through here, so positions are assigned in exactly one place.
+    private static func buildUserPlaylistSnapshot(
+        firstPage: PipedPlaylistResponse,
+        allStreams: [PipedVideoItem],
+        playlistID: String,
+        instanceURL: URL
+    ) -> RemotePlaylistSnapshot {
+        let playlist = PipedPlaylistResponse(
+            name: firstPage.name,
+            description: firstPage.description,
+            uploader: firstPage.uploader,
+            uploaderUrl: firstPage.uploaderUrl,
+            uploaderAvatar: firstPage.uploaderAvatar,
+            videos: firstPage.videos,
             relatedStreams: allStreams,
-            thumbnailUrl: firstResponse.thumbnailUrl,
+            thumbnailUrl: firstPage.thumbnailUrl,
             nextpage: nil
-        ).toPlaylist(instanceURL: instance.url, playlistID: id)
+        ).toPlaylist(instanceURL: instanceURL, playlistID: playlistID)
+
+        // Positions run 0-based across every page in fetch order and are counted
+        // over the *raw* stream list, malformed rows included: that is the index
+        // `POST /user/playlists/remove` addresses, and renumbering over the
+        // filtered display list would aim a removal one row off for every row
+        // the app could not parse. `displayRow` is the separate number that says
+        // where the entry appears in `playlist.videos`. Piped removes by
+        // position, so these ids die with this snapshot.
+        var displayRow = 0
+        var entries: [RemotePlaylistEntry] = []
+        for (position, item) in allStreams.enumerated() {
+            guard case .video(let video) = item else { continue }
+            entries.append(
+                RemotePlaylistEntry(
+                    id: .piped(playlistID: playlistID, position: position),
+                    video: video.toVideo(instanceURL: instanceURL),
+                    position: position,
+                    displayRow: displayRow
+                )
+            )
+            displayRow += 1
+        }
+
+        return RemotePlaylistSnapshot(playlist: playlist, entries: entries)
+    }
+
+    /// Runs the snapshot assembly over raw page payloads, decoding them the way
+    /// the network path does. Lets the paging and position rules be exercised
+    /// without a server: the first payload is a `/playlists/{id}` response,
+    /// every later one a `/nextpage/playlists/{id}` response.
+    static func userPlaylistSnapshot(
+        fromPageJSON pages: [Data],
+        playlistID: String,
+        instanceURL: URL
+    ) throws -> RemotePlaylistSnapshot {
+        let decoder = HTTPClient.makeAPIDecoder()
+        guard let firstData = pages.first else {
+            throw APIError.decodingError("No playlist pages to decode")
+        }
+
+        let firstPage = try decoder.decode(PipedPlaylistResponse.self, from: firstData)
+        var allStreams = firstPage.relatedStreams ?? []
+        for data in pages.dropFirst() {
+            let nextPage = try decoder.decode(PipedPlaylistNextPageResponse.self, from: data)
+            allStreams.append(contentsOf: nextPage.relatedStreams ?? [])
+        }
+
+        return buildUserPlaylistSnapshot(
+            firstPage: firstPage,
+            allStreams: allStreams,
+            playlistID: playlistID,
+            instanceURL: instanceURL
+        )
+    }
+
+    // MARK: - Playlist Management
+
+    /// Creates a playlist owned by the logged-in user.
+    ///
+    /// Piped answers with `{"playlistId"}` alone — there is no privacy setting
+    /// to pass and no playlist body to read back.
+    /// - Parameters:
+    ///   - name: The playlist name
+    ///   - instance: The Piped instance
+    ///   - authToken: The auth token from login
+    /// - Returns: The new playlist's ID
+    func createPlaylist(name: String, instance: Instance, authToken: String) async throws -> String {
+        struct CreateRequest: Encodable, Sendable {
+            let name: String
+        }
+
+        struct CreateResponse: Decodable, Sendable {
+            let playlistId: String
+        }
+
+        let endpoint = try writeEndpoint(
+            path: "/user/playlists/create",
+            authToken: authToken,
+            body: CreateRequest(name: name)
+        )
+
+        let response = try await performWrite(CreateResponse.self, endpoint: endpoint, instance: instance)
+        return response.playlistId
+    }
+
+    /// Renames one of the user's playlists.
+    /// - Parameters:
+    ///   - id: The playlist ID
+    ///   - newName: The name to store
+    ///   - instance: The Piped instance
+    ///   - authToken: The auth token from login
+    func renamePlaylist(id: String, newName: String, instance: Instance, authToken: String) async throws {
+        struct RenameRequest: Encodable, Sendable {
+            let playlistId: String
+            let newName: String
+        }
+
+        let endpoint = try writeEndpoint(
+            path: "/user/playlists/rename",
+            authToken: authToken,
+            body: RenameRequest(playlistId: id, newName: newName)
+        )
+
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
+    }
+
+    /// Replaces the description of one of the user's playlists.
+    ///
+    /// PATCH, unlike every other playlist write here. Upstream shipped this as
+    /// `POST /user/playlists/description/change` and replaced it with
+    /// `PATCH /user/playlists/description` the same afternoon, so no instance
+    /// worth supporting is still on the POST spelling.
+    /// - Parameters:
+    ///   - id: The playlist ID
+    ///   - description: The description to store
+    ///   - instance: The Piped instance
+    ///   - authToken: The auth token from login
+    func updatePlaylistDescription(
+        id: String,
+        description: String,
+        instance: Instance,
+        authToken: String
+    ) async throws {
+        struct DescriptionRequest: Encodable, Sendable {
+            let playlistId: String
+            let description: String
+        }
+
+        let endpoint = try writeEndpoint(
+            path: "/user/playlists/description",
+            method: .patch,
+            authToken: authToken,
+            body: DescriptionRequest(playlistId: id, description: description)
+        )
+
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
+    }
+
+    /// Deletes one of the user's playlists.
+    /// - Parameters:
+    ///   - id: The playlist ID
+    ///   - instance: The Piped instance
+    ///   - authToken: The auth token from login
+    func deletePlaylist(id: String, instance: Instance, authToken: String) async throws {
+        struct DeleteRequest: Encodable, Sendable {
+            let playlistId: String
+        }
+
+        let endpoint = try writeEndpoint(
+            path: "/user/playlists/delete",
+            authToken: authToken,
+            body: DeleteRequest(playlistId: id)
+        )
+
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
+    }
+
+    /// Appends a video to one of the user's playlists.
+    ///
+    /// Sent as `videoIds`, the plural form. Upstream reads both spellings — the
+    /// singular `videoId` is kept only for backwards compatibility, and the
+    /// plural has been accepted since the batching change — so the plural is
+    /// the one that will still be there.
+    /// - Parameters:
+    ///   - id: The playlist to add to
+    ///   - videoID: The video to add
+    ///   - instance: The Piped instance
+    ///   - authToken: The auth token from login
+    func addToPlaylist(id: String, videoID: String, instance: Instance, authToken: String) async throws {
+        struct AddRequest: Encodable, Sendable {
+            let playlistId: String
+            let videoIds: [String]
+        }
+
+        let endpoint = try writeEndpoint(
+            path: "/user/playlists/add",
+            authToken: authToken,
+            body: AddRequest(playlistId: id, videoIds: [videoID])
+        )
+
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
+    }
+
+    /// Removes the row at a position from one of the user's playlists.
+    ///
+    /// Positional, because Piped offers nothing else: the index is only
+    /// meaningful against the fetch it came from, and whoever calls this owes
+    /// the check that the position still holds what it did. That check is
+    /// deliberately not here — this layer is stateless and has no snapshot to
+    /// compare against.
+    /// - Parameters:
+    ///   - id: The playlist to remove from
+    ///   - index: Zero-based position of the row to remove
+    ///   - instance: The Piped instance
+    ///   - authToken: The auth token from login
+    func removeFromPlaylist(id: String, index: Int, instance: Instance, authToken: String) async throws {
+        struct RemoveRequest: Encodable, Sendable {
+            let playlistId: String
+            let index: Int
+        }
+
+        let endpoint = try writeEndpoint(
+            path: "/user/playlists/remove",
+            authToken: authToken,
+            body: RemoveRequest(playlistId: id, index: index)
+        )
+
+        _ = try await performWrite(PipedMessageResponse.self, endpoint: endpoint, instance: instance)
+    }
+
+    /// Decodes the body of an authenticated Piped write.
+    ///
+    /// Piped answers a refused write with **HTTP 200** and `{"error": "..."}`:
+    /// adding a video it cannot fetch — region-blocked or deleted, neither rare
+    /// — and removing an index that is no longer there both come back that way,
+    /// so the status code settles nothing here. Decoding straight into the
+    /// success shape turns the server's own explanation into a decoding-failure
+    /// message nobody can act on, so the error shape is read first: a body that
+    /// carries `error` may carry `message` alongside it, and checking the
+    /// success shape first would read right past the failure.
+    /// - Parameters:
+    ///   - type: The success shape this endpoint answers with.
+    ///   - data: The raw response body.
+    /// - Returns: The decoded success shape.
+    /// - Throws: ``APIError/serverError(_:)`` carrying the server's message when
+    ///   the body is an error body.
+    static func decodeWriteResponse<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        let decoder = HTTPClient.makeAPIDecoder()
+
+        if let failure = try? decoder.decode(PipedErrorResponse.self, from: data) {
+            let message = failure.error.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !message.isEmpty {
+                throw APIError.serverError(message)
+            }
+        }
+
+        do {
+            return try decoder.decode(type, from: data)
+        } catch let error as DecodingError {
+            throw APIError.decodingError(error)
+        }
+    }
+
+    /// Sends an authenticated write and reads its body the way ``decodeWriteResponse(_:from:)`` does.
+    private func performWrite<T: Decodable>(
+        _ type: T.Type,
+        endpoint: GenericEndpoint,
+        instance: Instance
+    ) async throws -> T {
+        let data = try await httpClient.fetchData(endpoint, baseURL: instance.url)
+        return try Self.decodeWriteResponse(type, from: data)
+    }
+
+    /// Builds an authenticated JSON write request. Piped wants the token bare in
+    /// `Authorization` — no `Bearer` — on every one of these.
+    private nonisolated func writeEndpoint(
+        path: String,
+        method: HTTPMethod = .post,
+        authToken: String,
+        body: some Encodable
+    ) throws -> GenericEndpoint {
+        GenericEndpoint(
+            path: path,
+            method: method,
+            headers: ["Authorization": authToken, "Content-Type": "application/json"],
+            body: try JSONEncoder().encode(body)
+        )
     }
 }
 
@@ -418,9 +730,18 @@ private struct PipedLoginResponse: Decodable, Sendable {
     let token: String
 }
 
-/// Generic message response from Piped API (used by subscribe/unsubscribe).
-private struct PipedMessageResponse: Decodable, Sendable {
+/// Generic message response from Piped API (used by subscribe/unsubscribe and
+/// every playlist write). Not private so the write-decode seam can be exercised
+/// against the shape the server really answers with.
+struct PipedMessageResponse: Decodable, Sendable {
     let message: String
+}
+
+/// The body Piped returns for a refused write — under HTTP 200 as often as not.
+/// Some spellings carry a `message` alongside `error`, which is why this shape
+/// is read before the success one.
+private struct PipedErrorResponse: Decodable, Sendable {
+    let error: String
 }
 
 /// Subscription info from Piped API.
@@ -492,6 +813,34 @@ private func stripHTML(_ html: String) -> String {
     return text.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+// MARK: - Piped Sentinels
+
+/// Piped writes `-1` where it has no value: playlist rows come back with
+/// `"views": -1` and `"uploaded": -1`, and trending rows carry the same
+/// sentinel. Mapped through as-is they render as "-0B views" and, once `-1`
+/// milliseconds becomes a date, "56 years ago" — so a negative reading is an
+/// absent one.
+enum PipedSentinel {
+    /// A count Piped actually has, or nil for its `-1` sentinel.
+    static func count(_ raw: Int64?) -> Int? {
+        guard let raw, raw >= 0 else { return nil }
+        return Int(raw)
+    }
+
+    /// The upload date Piped actually has, or nil for its `-1` sentinel.
+    /// Piped sends this field as epoch **milliseconds**.
+    ///
+    /// A stamp of the moment the instance answered is the other reading that
+    /// means nothing — it renders as "in 0 seconds" — and is dropped the same
+    /// way.
+    static func uploadedDate(_ raw: Int64?) -> Date? {
+        guard let raw, raw >= 0 else { return nil }
+        let date = Date(timeIntervalSince1970: TimeInterval(raw) / 1000)
+        guard !RelativeDateFormatter.isStampedNow(date) else { return nil }
+        return date
+    }
+}
+
 // MARK: - Piped Response Models
 
 private struct PipedVideo: Decodable, Sendable {
@@ -528,14 +877,15 @@ private struct PipedVideo: Decodable, Sendable {
                 thumbnailURL: uploaderAvatar.flatMap { URL(string: $0) }
             ),
             duration: TimeInterval(duration),
-            publishedAt: uploaded.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
+            publishedAt: PipedSentinel.uploadedDate(uploaded),
             publishedText: uploadedDate,
-            viewCount: views.map { Int($0) },
+            viewCount: PipedSentinel.count(views),
             likeCount: nil,
             thumbnails: Thumbnail.fallbackChain(for: thumbnail.flatMap { URL(string: $0) }),
             isLive: duration == -1,
             isUpcoming: false,
-            scheduledStartTime: nil
+            scheduledStartTime: nil,
+            isShort: isShort
         )
     }
 }
@@ -607,10 +957,10 @@ private struct PipedStreamResponse: Decodable, Sendable {
                 thumbnailURL: uploaderAvatar.flatMap { URL(string: $0) }
             ),
             duration: TimeInterval(duration),
-            publishedAt: uploaded.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
+            publishedAt: PipedSentinel.uploadedDate(uploaded),
             publishedText: uploadDate,
-            viewCount: views.map { Int($0) },
-            likeCount: likes.map { Int($0) },
+            viewCount: PipedSentinel.count(views),
+            likeCount: PipedSentinel.count(likes),
             thumbnails: thumbnails,
             isLive: livestream ?? false,
             isUpcoming: false,
@@ -743,6 +1093,7 @@ private struct PipedSearchItem: Decodable, Sendable {
     let views: Int64?
     let videos: Int64?
     let subscribers: Int64?
+    let isShort: Bool?
 
     var videoId: String? {
         url?.replacingOccurrences(of: "/watch?v=", with: "")
@@ -767,14 +1118,15 @@ private struct PipedSearchItem: Decodable, Sendable {
                 thumbnailURL: uploaderAvatar.flatMap { URL(string: $0) }
             ),
             duration: TimeInterval(duration ?? 0),
-            publishedAt: uploaded.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
+            publishedAt: PipedSentinel.uploadedDate(uploaded),
             publishedText: uploadedDate,
-            viewCount: views.map { Int($0) },
+            viewCount: PipedSentinel.count(views),
             likeCount: nil,
             thumbnails: Thumbnail.fallbackChain(for: thumbnail.flatMap { URL(string: $0) }),
             isLive: duration == -1,
             isUpcoming: false,
-            scheduledStartTime: nil
+            scheduledStartTime: nil,
+            isShort: isShort
         )
     }
 
@@ -783,8 +1135,8 @@ private struct PipedSearchItem: Decodable, Sendable {
             id: .global(channelId ?? ""),
             name: name ?? "",
             description: description,
-            subscriberCount: subscribers.map { Int($0) },
-            videoCount: videos.map { Int($0) },
+            subscriberCount: PipedSentinel.count(subscribers),
+            videoCount: PipedSentinel.count(videos),
             thumbnailURL: thumbnail.flatMap { URL(string: $0) },
             isVerified: uploaderVerified ?? false
         )
@@ -795,7 +1147,7 @@ private struct PipedSearchItem: Decodable, Sendable {
             id: .global(playlistId ?? ""),
             title: name ?? "",
             author: uploaderName.map { Author(id: "", name: $0) },
-            videoCount: videos.map { Int($0) } ?? 0,
+            videoCount: PipedSentinel.count(videos) ?? 0,
             thumbnailURL: thumbnail.flatMap { URL(string: $0) }
         )
     }
@@ -818,7 +1170,7 @@ private struct PipedChannelResponse: Decodable, Sendable {
             id: .global(id),
             name: name,
             description: description,
-            subscriberCount: subscriberCount.map { Int($0) },
+            subscriberCount: PipedSentinel.count(subscriberCount),
             thumbnailURL: avatarUrl.flatMap { URL(string: $0) },
             bannerURL: bannerUrl.flatMap { URL(string: $0) },
             isVerified: verified ?? false
@@ -888,7 +1240,7 @@ private struct PipedTabPlaylist: Decodable, Sendable {
             id: .global(playlistId ?? ""),
             title: name ?? "",
             author: uploaderName.map { Author(id: uploaderUrl?.replacingOccurrences(of: "/channel/", with: "") ?? "", name: $0) },
-            videoCount: videos.map { Int($0) } ?? 0,
+            videoCount: PipedSentinel.count(videos) ?? 0,
             thumbnailURL: thumbnail.flatMap { URL(string: $0) }
         )
     }
@@ -945,7 +1297,9 @@ private struct PipedPlaylistResponse: Decodable, Sendable {
     let uploader: String?
     let uploaderUrl: String?
     let uploaderAvatar: String?
-    let videos: Int?
+    /// Read as 64-bit like every other Piped count, so the `-1` sentinel goes
+    /// through the same reading as the rest.
+    let videos: Int64?
     let relatedStreams: [PipedVideoItem]?
     let thumbnailUrl: String?
     let nextpage: String?
@@ -970,7 +1324,7 @@ private struct PipedPlaylistResponse: Decodable, Sendable {
                     thumbnailURL: uploaderAvatar.flatMap { URL(string: $0) }
                 )
             },
-            videoCount: videos ?? validVideos.count,
+            videoCount: PipedSentinel.count(videos) ?? validVideos.count,
             thumbnailURL: thumbnailUrl.flatMap { URL(string: $0) },
             videos: validVideos
         )
@@ -989,14 +1343,14 @@ private struct PipedUserPlaylist: Decodable, Sendable {
     let name: String
     let shortDescription: String?
     let thumbnail: String?
-    let videos: Int?
+    let videos: Int64?
 
     nonisolated func toPlaylist() -> Playlist {
         Playlist(
             id: .global(id),
             title: name,
             description: shortDescription,
-            videoCount: videos ?? 0,
+            videoCount: PipedSentinel.count(videos) ?? 0,
             thumbnailURL: thumbnail.flatMap { URL(string: $0) }
         )
     }

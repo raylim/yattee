@@ -96,16 +96,14 @@ final class ToastManager {
             var lastPlayerVisible = self.isPlayerVisible
             
             while !Task.isCancelled {
-                // Wait for navigationCoordinator.isPlayerExpanded to change
-                // (On macOS, ExpandedPlayerWindowManager.isPresented is updated when window shows,
-                // but we track the NavigationCoordinator state which triggers the window)
-                if let coordinator = self.navigationCoordinator {
-                    _ = withObservationTracking {
-                        coordinator.isPlayerExpanded
-                    } onChange: { }
-                }
-                
+                #if os(macOS)
+                // ExpandedPlayerWindowManager.isPresented follows the window
+                // and is not observable, so poll it.
                 try? await Task.sleep(for: .milliseconds(100))
+                #else
+                guard let coordinator = self.navigationCoordinator else { break }
+                await observationChange { _ = coordinator.isPlayerExpanded }
+                #endif
                 guard !Task.isCancelled else { break }
                 
                 let currentPlayerVisible = self.isPlayerVisible
@@ -116,6 +114,29 @@ final class ToastManager {
                 }
             }
         }
+    }
+
+    // MARK: - Overlay Hosts
+
+    /// Toast overlays inside presented sheets, counted per scope and depth.
+    /// Only the deepest overlay of a scope shows its toasts, so they appear
+    /// above the sheet instead of behind it.
+    private var sheetOverlayDepths: [ToastScope: [Int: Int]] = [:]
+
+    func registerOverlay(scope: ToastScope, depth: Int) {
+        guard depth > 0 else { return }
+        sheetOverlayDepths[scope, default: [:]][depth, default: 0] += 1
+    }
+
+    func unregisterOverlay(scope: ToastScope, depth: Int) {
+        guard depth > 0, let count = sheetOverlayDepths[scope]?[depth] else { return }
+        sheetOverlayDepths[scope]?[depth] = count > 1 ? count - 1 : nil
+    }
+
+    /// Depth of the overlay that shows a scope's toasts: 0 for the window's
+    /// own overlay, higher inside sheets.
+    func topOverlayDepth(for scope: ToastScope) -> Int {
+        sheetOverlayDepths[scope]?.keys.max() ?? 0
     }
 
     // MARK: - Filtered Access
@@ -235,50 +256,6 @@ final class ToastManager {
         dismissTasks[id] = task
     }
 
-    // MARK: - Player Scope Convenience Methods
-
-    /// Show a loading toast (player-only scope, longer auto-dismiss delay).
-    @discardableResult
-    func showPlayerLoading(_ title: String, subtitle: String? = nil) -> UUID {
-        show(
-            scopes: [.player],
-            category: .loading,
-            title: title,
-            subtitle: subtitle,
-            icon: nil, // Will show ProgressView
-            iconColor: nil,
-            autoDismissDelay: 30.0 // Long timeout for loading states
-        )
-    }
-
-    /// Show a retry toast (player-only scope).
-    @discardableResult
-    func showPlayerRetry(_ title: String, subtitle: String? = nil) -> UUID {
-        show(
-            scopes: [.player],
-            category: .retry,
-            title: title,
-            subtitle: subtitle,
-            icon: "arrow.clockwise",
-            iconColor: .orange,
-            autoDismissDelay: 5.0
-        )
-    }
-
-    /// Show an error toast (player-only scope).
-    @discardableResult
-    func showPlayerError(_ title: String, subtitle: String? = nil) -> UUID {
-        show(
-            scopes: [.player],
-            category: .error,
-            title: title,
-            subtitle: subtitle,
-            icon: "exclamationmark.triangle.fill",
-            iconColor: .red,
-            autoDismissDelay: 5.0
-        )
-    }
-
     // MARK: - General Convenience Methods
 
     /// Show an error toast (shows in player if visible, otherwise main).
@@ -325,42 +302,6 @@ final class ToastManager {
     /// Dismiss a specific toast.
     func dismiss(id: UUID, animated: Bool = true) {
         dismissInternal(id: id, animated: animated)
-    }
-
-    /// Dismiss all toasts in a category (across all scopes).
-    func dismissCategory(_ category: ToastCategory) {
-        let toastsToDismiss = activeToasts.filter { $0.category == category }
-        for toast in toastsToDismiss {
-            dismissInternal(id: toast.id, animated: true)
-        }
-    }
-
-    /// Dismiss all toasts in a category for a specific active scope.
-    func dismissCategory(_ category: ToastCategory, scope: ToastScope) {
-        let toastsToDismiss = activeToasts.filter { $0.category == category && $0.activeScope == scope }
-        for toast in toastsToDismiss {
-            dismissInternal(id: toast.id, animated: true)
-        }
-    }
-
-    /// Dismiss all toasts in a specific active scope.
-    func dismissScope(_ scope: ToastScope) {
-        let toastsToDismiss = activeToasts.filter { $0.activeScope == scope }
-        for toast in toastsToDismiss {
-            dismissInternal(id: toast.id, animated: true)
-        }
-    }
-
-    /// Dismiss all toasts.
-    func dismissAll() {
-        for task in dismissTasks.values {
-            task.cancel()
-        }
-        dismissTasks.removeAll()
-
-        withAnimation(.easeInOut(duration: 0.25)) {
-            activeToasts.removeAll()
-        }
     }
 
     // MARK: - Private

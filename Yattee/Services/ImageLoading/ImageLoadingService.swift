@@ -118,20 +118,6 @@ final class ImageLoadingService: Sendable {
 
         LoggingService.shared.info("Image cache cleared", category: .imageLoading)
     }
-
-    /// Returns the disk cache size in bytes.
-    func diskCacheSize() -> Int {
-        guard let dataCache = ImagePipeline.shared.configuration.dataCache as? DataCache else {
-            return 0
-        }
-        return dataCache.totalSize
-    }
-
-    /// Returns a formatted string of the disk cache size.
-    func formattedDiskCacheSize() -> String {
-        let size = diskCacheSize()
-        return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
-    }
 }
 
 /// Pipeline delegate that normalizes Nuke's cache key by stripping per-request
@@ -140,5 +126,10 @@ private final class TokenStrippingPipelineDelegate: ImagePipelineDelegate {
     func cacheKey(for request: ImageRequest, pipeline _: ImagePipeline) -> String? {
         guard let url = request.url else { return nil }
         return ImageLoadingService.cacheKey(for: url)
+    }
+
+    func imageTask(_ task: ImageTask, didCompleteWithResult result: Result<ImageResponse, ImagePipeline.Error>, pipeline _: ImagePipeline) {
+        guard PerfCounter.enabled, case let .success(response) = result else { return }
+        PerfCounter.count(response.cacheType == nil ? "image.loadFromNetwork" : "image.loadFromCache")
     }
 }

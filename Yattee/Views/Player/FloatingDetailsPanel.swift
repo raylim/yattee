@@ -23,7 +23,6 @@ struct FloatingDetailsPanel: View {
     @Environment(\.colorScheme) private var systemColorScheme
 
     let onPinToggle: () -> Void
-    let onAlignmentToggle: () -> Void
     let isPinned: Bool
     let panelSide: FloatingPanelSide
     let onChannelTap: (() -> Void)?
@@ -37,13 +36,11 @@ struct FloatingDetailsPanel: View {
     // Player controls layout for pill settings
     let playerControlsLayout: PlayerControlsLayout
     @State private var isCommentsExpanded: Bool = false
-    @State private var showFormattedDate = false
-    @State private var showOriginalTitle = false
+    @State private var selectedPage: PanelPageType = .info
     @State private var scrollOffset: CGFloat = 0
     @State private var panelHeight: CGFloat = 0
     @State private var scrollToTopTrigger: Bool = false
-    @State private var showQueueSheet: Bool = false
-    @State private var showPlaylistSheet: Bool = false
+    @Environment(\.presentAppSheet) private var presentAppSheet
     @State private var isDragHandleActive: Bool = false
 
     private var settingsManager: SettingsManager? { appEnvironment?.settingsManager }
@@ -51,16 +48,12 @@ struct FloatingDetailsPanel: View {
     private var playerService: PlayerService? { appEnvironment?.playerService }
     private var playerState: PlayerState? { playerService?.state }
 
-    // Read video and dislikeCount from playerState for reactive updates
+    // Read video from playerState for reactive updates
     private var video: Video? { playerState?.currentVideo }
-    private var dislikeCount: Int? { playerState?.dislikeCount }
 
     // Comments helpers
     private var comments: [Comment] { playerState?.comments ?? [] }
     private var commentsState: CommentsLoadState { playerState?.commentsState ?? .idle }
-
-    // Video details helpers
-    private var videoDetailsState: VideoDetailsLoadState { playerState?.videoDetailsState ?? .idle }
 
     // Queue helpers
     private var queue: [QueuedVideo] { playerState?.queue ?? [] }
@@ -74,19 +67,44 @@ struct FloatingDetailsPanel: View {
         !playerPillSettings.buttons.isEmpty
     }
 
-    // Comments pill helpers
+    // Comments pill helpers (mode lives on the comments page settings)
     private var commentsPillMode: CommentsPillMode {
-        playerPillSettings.effectiveCommentsPillMode
+        panelSettings.commentsPillMode
     }
     private var shouldShowCommentsPill: Bool {
-        playerPillSettings.shouldShowCommentsPill
+        commentsPillMode != .disabled
     }
     private var isCommentsPillAlwaysCollapsed: Bool {
-        playerPillSettings.isCommentsPillAlwaysCollapsed
+        commentsPillMode.alwaysCollapsed
     }
 
     private var hasVideoDescription: Bool {
         !(video?.description ?? "").isEmpty
+    }
+
+    // Panel pages configuration
+    private var panelSettings: PanelSettings {
+        playerControlsLayout.effectivePanelSettings
+    }
+
+    /// iPhone renders the same single info page with inline sections as the
+    /// portrait panel: no page bar, comments stay on the pill/overlay.
+    private var usesInlineSections: Bool {
+        PanelSettings.isSectionsOnlyDevice
+    }
+
+    /// iPhone is floating-only: no pin button in the page bar.
+    private var pageBarPinAction: PanelPageBarPinAction? {
+        guard !PanelSettings.isSectionsOnlyDevice else { return nil }
+        return PanelPageBarPinAction(isPinned: isPinned, toggle: onPinToggle)
+    }
+
+    /// Whether the comments pill should route to the comments page instead of
+    /// the overlay.
+    private var isCommentsPageAvailable: Bool {
+        !usesInlineSections
+            && panelSettings.isPageEnabled(.comments)
+            && !(video?.isFromMediaSource ?? true)
     }
 
     /// Whether any pills are currently visible
@@ -99,29 +117,6 @@ struct FloatingDetailsPanel: View {
     private var hasExpandedCommentsPill: Bool {
         let hasCommentsPill = commentsState == .loaded && !comments.isEmpty && shouldShowCommentsPill
         return hasCommentsPill && shouldShowPlayerPill && !isCommentsPillAlwaysCollapsed && hasVideoDescription
-    }
-
-    /// Returns the first enabled Yattee Server instance URL, if any.
-    private var yatteeServerURL: URL? {
-        appEnvironment?.instancesManager.yatteeServerInstances.first { $0.isEnabled }?.url
-    }
-
-    /// Returns the DeArrow title if available and enabled.
-    private func deArrowTitle(for video: Video) -> String? {
-        appEnvironment?.deArrowBrandingProvider.title(for: video)
-    }
-
-    /// Returns the display title based on toggle state.
-    private func displayTitle(for video: Video) -> String {
-        if let deArrow = deArrowTitle(for: video) {
-            return showOriginalTitle ? video.title : deArrow
-        }
-        return video.title
-    }
-
-    /// Whether the title can be toggled (DeArrow title is available).
-    private func canToggleTitle(for video: Video) -> Bool {
-        deArrowTitle(for: video) != nil
     }
 
     /// Minimum panel width
@@ -147,7 +142,7 @@ struct FloatingDetailsPanel: View {
         HStack(spacing: 0) {
             // Resize grabber on left when panel is on right side
             if panelSide == .right {
-                grabberWithPinButton
+                grabber
             }
 
             // Main panel content
@@ -155,14 +150,13 @@ struct FloatingDetailsPanel: View {
 
             // Resize grabber on right when panel is on left side
             if panelSide == .left {
-                grabberWithPinButton
+                grabber
             }
         }
         .environment(\.colorScheme, isPinned ? systemColorScheme : .dark)
         .animation(.easeInOut(duration: 0.25), value: isPinned)
         .onChange(of: video.id) { _, _ in
             // Comments state is managed by parent - just reset local state
-            showOriginalTitle = false
             isCommentsExpanded = false
         }
         .onChange(of: isCommentsExpanded) { _, newValue in
@@ -177,18 +171,10 @@ struct FloatingDetailsPanel: View {
             // Re-clamp width when available width changes (e.g., rotation)
             panelWidth = clampWidth(panelWidth)
         }
-        .sheet(isPresented: $showQueueSheet) {
-            QueueManagementSheet()
-        }
-        .sheet(isPresented: $showPlaylistSheet) {
-            if let currentVideo = playerState?.currentVideo {
-                PlaylistSelectorSheet(video: currentVideo)
-            }
-        }
     }
 
     @ViewBuilder
-    private var grabberWithPinButton: some View {
+    private var grabber: some View {
         PanelResizeGrabber(
             panelWidth: $panelWidth,
             minWidth: Self.minPanelWidth,
@@ -197,63 +183,35 @@ struct FloatingDetailsPanel: View {
             isPinned: isPinned,
             isDragActive: $isDragHandleActive
         )
-        .overlay(alignment: .center) {
-            PanelPinButton(
-                isPinned: isPinned,
-                panelSide: panelSide,
-                onPinToggle: onPinToggle,
-                isDragHandleActive: $isDragHandleActive
-            )
-            .offset(y: -65)
-            .zIndex(10) // Ensure pin button appears above panel content
-        }
-        .overlay(alignment: .center) {
-            PanelAlignmentButton(
-                panelSide: panelSide,
-                onAlignmentToggle: onAlignmentToggle,
-                isDragHandleActive: $isDragHandleActive
-            )
-            .offset(y: 65)
-            .zIndex(10)
-        }
         .zIndex(10) // Ensure grabber overlay appears above panel
     }
 
     @ViewBuilder
     private func panelContent(video: Video) -> some View {
         VStack(spacing: 0) {
-            // Scrollable content
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        // Scroll offset tracker at top
-                        Color.clear
-                            .frame(height: 0)
-                            .id("panelTop")
-                            .background(
-                                GeometryReader { geo in
-                                    Color.clear
-                                        .onChange(of: geo.frame(in: .named("panelScroll")).origin.y) { _, newValue in
-                                            scrollOffset = -newValue
-                                        }
-                                }
-                            )
-
-                        videoInfo(video)
-
-                        Divider()
-                            .padding(.horizontal)
-
-                        infoTabSection(video)
-                    }
-                }
-                .coordinateSpace(name: "panelScroll")
-                .onChange(of: scrollToTopTrigger) { _, _ in
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        proxy.scrollTo("panelTop", anchor: .top)
-                    }
-                }
-            }
+            // Unified page content (page bar + selected page)
+            PlayerPanelContentView(
+                panelSettings: panelSettings,
+                selectedPage: $selectedPage,
+                context: PanelPageContext(
+                    appEnvironment: appEnvironment,
+                    video: video,
+                    accentColor: accentColor,
+                    onChannelTap: onChannelTap
+                ),
+                scrollConfig: PanelScrollConfig(
+                    topInset: 8,
+                    bottomInset: 80,
+                    scrollOffsetChanged: { offset in
+                        scrollOffset = offset
+                    },
+                    scrollToTopTrigger: scrollToTopTrigger
+                ),
+                pageBarTopPadding: 12,
+                showPageBar: !usesInlineSections,
+                pageBarPinAction: pageBarPinAction,
+                inlineInfoSections: usesInlineSections
+            )
         }
         .frame(width: clampWidth(panelWidth))
         .background { panelBackground }
@@ -277,7 +235,11 @@ struct FloatingDetailsPanel: View {
             bottomOverlay(video: video)
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: commentsState)
-        .overlay { expandedCommentsOverlay(video: video) }
+        .overlay {
+            if !isCommentsPageAvailable {
+                expandedCommentsOverlay(video: video)
+            }
+        }
         .animation(.smooth(duration: 0.3), value: isCommentsExpanded)
     }
 
@@ -364,7 +326,7 @@ struct FloatingDetailsPanel: View {
             VStack(spacing: 12) {
                 // Expanded comments pill on its own row (when player pill exists and pill not collapsed)
                 if hasCommentsPill, let firstComment = comments.first, shouldShowPlayerPill, !isPillCollapsed {
-                    CommentsPillView(comment: firstComment, isCollapsed: false, onTap: expandComments)
+                    CommentsPillView(comment: firstComment, isCollapsed: false, showAvatar: panelSettings.commentsShowAvatars, onTap: expandComments)
                 }
 
                 ZStack {
@@ -407,8 +369,7 @@ struct FloatingDetailsPanel: View {
                 }(),
                 video: video,
                 playbackRate: playerState?.rate ?? .x1,
-                showingPlaylistSheet: $showPlaylistSheet,
-                onQueueTap: { showQueueSheet = true },
+                onQueueTap: { presentAppSheet(.queue()) },
                 onPrevious: { Task { await playerService?.playPrevious() } },
                 onPlayPause: { playerService?.togglePlayPause() },
                 onNext: { Task { await playerService?.playNext() } },
@@ -452,7 +413,7 @@ struct FloatingDetailsPanel: View {
         HStack {
             if hasCommentsPill, let firstComment = comments.first {
                 if !shouldShowPlayerPill {
-                    CommentsPillView(comment: firstComment, isCollapsed: isPillCollapsed, onTap: expandComments)
+                    CommentsPillView(comment: firstComment, isCollapsed: isPillCollapsed, showAvatar: panelSettings.commentsShowAvatars, onTap: expandComments)
                 } else if isPillCollapsed {
                     CommentsPillView(comment: firstComment, isCollapsed: true, onTap: expandComments)
                 }
@@ -487,7 +448,8 @@ struct FloatingDetailsPanel: View {
         ExpandedCommentsView(
             videoID: video.id.videoID,
             onClose: collapseComments,
-            onDismissGestureEnded: handleCommentsDismissGestureEnded
+            onDismissGestureEnded: handleCommentsDismissGestureEnded,
+            showAvatars: panelSettings.commentsShowAvatars
         )
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .visualEffect { content, proxy in
@@ -514,60 +476,14 @@ struct FloatingDetailsPanel: View {
         )
     }
 
-    // MARK: - Video Info
-
-    private func videoInfo(_ video: Video) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Title - full width
-            Text(displayTitle(for: video))
-                .font(.title3)
-                .fontWeight(.semibold)
-                .lineLimit(3)
-                .onTapGesture {
-                    if canToggleTitle(for: video) {
-                        showOriginalTitle.toggle()
-                    }
-                }
-
-            // Stats row - only show for non-media-source videos
-            if !video.isFromMediaSource {
-                VideoStatsRow(
-                    playerState: playerState,
-                    showFormattedDate: $showFormattedDate,
-                    returnYouTubeDislikeEnabled: settingsManager?.returnYouTubeDislikeEnabled ?? false
-                )
-            }
-
-            // Channel row with context menu
-            VideoChannelRow(
-                author: video.author,
-                source: video.id.source,
-                yatteeServerURL: yatteeServerURL,
-                onChannelTap: onChannelTap,
-                video: video,
-                accentColor: accentColor,
-                showSubscriberCount: !video.isFromMediaSource,
-                isLoadingDetails: playerState?.videoDetailsState == .loading
-            )
-        }
-        .padding()
-    }
-
-    // MARK: - Info Tab Section
-
-    private func infoTabSection(_ video: Video) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Description only (no picker)
-            descriptionContent(video.description ?? "")
-
-            // Extra space at bottom so content can scroll above the comments pill
-            Spacer()
-                .frame(height: 80)
-        }
-        .padding(.vertical)
-    }
-
     private func expandComments() {
+        if isCommentsPageAvailable {
+            // Route to the comments page instead of the overlay
+            withAnimation(.smooth(duration: 0.3)) {
+                selectedPage = .comments
+            }
+            return
+        }
         // Use same animation as player sheet expand (0.3s, no bounce)
         withAnimation(.smooth(duration: 0.3)) {
             isCommentsExpanded = true
@@ -588,131 +504,6 @@ struct FloatingDetailsPanel: View {
             collapseComments()
         }
         // Below threshold - scroll view will rubber-band back naturally
-    }
-
-    private func descriptionContent(_ description: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !description.isEmpty {
-                Text(DescriptionText.attributed(description, linkColor: accentColor))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .tint(accentColor)
-                    .padding(.horizontal)
-                    .handleTimestampLinks(using: playerService)
-            } else if videoDetailsState == .loading {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
-                }
-                .padding()
-            } else {
-                Text(String(localized: "player.noDescription"))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
-            }
-        }
-    }
-}
-
-// MARK: - Panel Resize Grabber
-
-/// A draggable handle for resizing the panel width.
-private struct PanelResizeGrabber: View {
-    @Binding var panelWidth: CGFloat
-    let minWidth: CGFloat
-    let maxWidth: CGFloat
-    let panelSide: FloatingPanelSide
-    let isPinned: Bool
-    @Binding var isDragActive: Bool
-
-    @State private var isDragging = false
-    @State private var dragStartWidth: CGFloat? = nil
-    @State private var dragStartLocation: CGFloat? = nil
-    #if os(macOS)
-    @State private var isHovering = false
-    #endif
-
-    /// Width of the grabber hit area
-    private static let grabberHitWidth: CGFloat = 20
-
-    /// Grabber fill color - needs to be visible against both light (pinned) and dark (floating) backgrounds
-    private var grabberColor: Color {
-        // When pinned (light background), use a darker gray for visibility
-        // When floating (dark background), use lighter color
-        let baseColor = isPinned ? Color.gray : Color.secondary
-        let isActive = isDragging
-        return baseColor.opacity(isActive ? 1.0 : (isPinned ? 0.5 : 0.6))
-    }
-
-    var body: some View {
-        // Full-height container for expanded hit area
-        Rectangle()
-            .fill(Color.clear)
-            .frame(width: Self.grabberHitWidth)
-            .frame(maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .overlay {
-                // Visual pill indicator (centered)
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(grabberColor)
-                    .frame(width: 6, height: 40)
-            }
-            .gesture(dragGesture)
-            #if os(macOS)
-            .onHover { hovering in
-                isHovering = hovering
-                isDragActive = hovering || isDragging
-                if hovering {
-                    NSCursor.resizeLeftRight.push()
-                } else {
-                    NSCursor.pop()
-                }
-            }
-            #endif
-            .animation(.easeInOut(duration: 0.15), value: isDragging)
-    }
-
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
-            .onChanged { value in
-                // Capture initial state on first drag event
-                if dragStartWidth == nil {
-                    dragStartWidth = panelWidth
-                    dragStartLocation = value.location.x
-                }
-
-                isDragging = true
-                isDragActive = true
-
-                guard let startWidth = dragStartWidth,
-                      let startLocation = dragStartLocation else { return }
-
-                // Calculate delta from absolute finger position (not translation)
-                let locationDelta = value.location.x - startLocation
-
-                // Apply delta based on panel side
-                let delta: CGFloat
-                if panelSide == .right {
-                    delta = -locationDelta
-                } else {
-                    delta = locationDelta
-                }
-
-                let newWidth = startWidth + delta
-                panelWidth = min(max(newWidth, minWidth), maxWidth)
-            }
-            .onEnded { _ in
-                dragStartWidth = nil
-                dragStartLocation = nil
-                isDragging = false
-                #if os(macOS)
-                isDragActive = isHovering
-                #else
-                isDragActive = false
-                #endif
-            }
     }
 }
 

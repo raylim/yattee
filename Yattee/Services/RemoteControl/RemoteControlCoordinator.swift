@@ -79,17 +79,6 @@ final class RemoteControlCoordinator {
     /// The device that's controlling us, if any.
     private(set) var controllingDevice: DiscoveredDevice?
 
-    /// This device's name for display.
-    var deviceName: String {
-        get { networkService.deviceName }
-        set { networkService.deviceName = newValue }
-    }
-
-    /// This device's ID.
-    var deviceID: String {
-        networkService.deviceID
-    }
-
     // MARK: - Dependencies
 
     private let networkService: LocalNetworkService
@@ -240,16 +229,11 @@ final class RemoteControlCoordinator {
     private func startIncognitoObserver() {
         incognitoObserverTask?.cancel()
         incognitoObserverTask = Task { [weak self] in
+            guard let settings = self?.settingsManager else { return }
             while !Task.isCancelled {
-                guard let self, let settings = self.settingsManager else { break }
-
                 let wasIncognito = settings.incognitoModeEnabled
-                _ = withObservationTracking {
-                    settings.incognitoModeEnabled
-                } onChange: { }
-
-                try? await Task.sleep(for: .milliseconds(100))
-                guard !Task.isCancelled else { break }
+                await observationChange { _ = settings.incognitoModeEnabled }
+                guard let self, !Task.isCancelled else { break }
 
                 let isIncognito = settings.incognitoModeEnabled
                 if isIncognito != wasIncognito {
@@ -337,24 +321,7 @@ final class RemoteControlCoordinator {
         }
     }
 
-    /// Send a command to all connected devices.
-    func broadcastCommand(_ command: RemoteControlCommand) async {
-        let commandDesc = String(describing: command).prefix(50)
-        rcDebug("COMMAND", "Broadcasting: \(commandDesc)")
-        await networkService.broadcast(command: command)
-    }
-
     // MARK: - Convenience Commands
-
-    /// Send play command to a device.
-    func play(on device: DiscoveredDevice) async {
-        await sendCommand(.play, to: device)
-    }
-
-    /// Send pause command to a device.
-    func pause(on device: DiscoveredDevice) async {
-        await sendCommand(.pause, to: device)
-    }
 
     /// Send toggle play/pause command to a device.
     func togglePlayPause(on device: DiscoveredDevice) async {
@@ -441,11 +408,6 @@ final class RemoteControlCoordinator {
         await sendCommand(.closeVideo, to: device)
     }
 
-    /// Toggle fullscreen on a device.
-    func toggleFullscreen(on device: DiscoveredDevice) async {
-        await sendCommand(.toggleFullscreen, to: device)
-    }
-
     /// Play next video in queue on a device.
     func playNext(on device: DiscoveredDevice) async {
         await sendCommand(.playNext, to: device)
@@ -480,8 +442,7 @@ final class RemoteControlCoordinator {
         // Compute fullscreen state (same logic as shouldShowFullscreenButton in PlayerControlsActions)
         #if os(iOS)
         let isIPad = UIDevice.current.userInterfaceIdiom == .pad
-        let screenBounds = UIScreen.main.bounds
-        let isWideScreenLayout = screenBounds.width > screenBounds.height
+        let isWideScreenLayout = navigationCoordinator?.isWideScreenLayoutActive ?? false
         // iPad in widescreen = can't force rotation, so fullscreen toggle not available
         let canToggleFullscreen = !(isIPad && isWideScreenLayout) && state.currentVideo != nil
         let isFullscreen = isWideScreenLayout
@@ -1012,18 +973,6 @@ final class RemoteControlCoordinator {
             playerService?.openVideo(video, startTime: startTime)
             rcLog("LOADVIDEO", "Extracted video opened: \(video.title)", details: "startTime=\(startTime ?? 0)")
         }
-    }
-
-    private func expandPlayerIfNeeded() {
-        #if os(iOS) || os(macOS)
-        let isPiPActive = (playerService?.currentBackend as? MPVBackend)?.isPiPActive ?? false
-        rcDebug("PLAYER", "expandPlayerIfNeeded - isPiPActive=\(isPiPActive)")
-        if !isPiPActive {
-            navigationCoordinator?.expandPlayer()
-        }
-        #else
-        navigationCoordinator?.expandPlayer()
-        #endif
     }
 
     // MARK: - State Broadcasting

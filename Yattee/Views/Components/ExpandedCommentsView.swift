@@ -19,19 +19,13 @@ struct ExpandedCommentsView: View {
     // Panel resize drag callbacks
     var onDragChanged: ((CGFloat) -> Void)? = nil
     var onDragEnded: ((CGFloat, CGFloat) -> Void)? = nil
+    /// Whether comment rows show author avatars (comments page setting).
+    var showAvatars: Bool = true
 
     @State private var showScrollButton = false
     @State private var scrollToTopTrigger: Int = 0
     @State private var scrollBounceOffset: CGFloat = 0
     @State private var isDismissThresholdReached = false
-
-    private var playerState: PlayerState? { appEnvironment?.playerService.state }
-    private var contentService: ContentService? { appEnvironment?.contentService }
-    private var instancesManager: InstancesManager? { appEnvironment?.instancesManager }
-
-    private var comments: [Comment] { playerState?.comments ?? [] }
-    private var commentsState: CommentsLoadState { playerState?.commentsState ?? .idle }
-    private var videoSource: ContentSource? { playerState?.currentVideo?.id.source }
 
     private var backgroundColor: Color {
         #if os(iOS)
@@ -223,6 +217,49 @@ struct ExpandedCommentsView: View {
 
     @ViewBuilder
     private var commentsContent: some View {
+        CommentsListContent(videoID: videoID, showAvatars: showAvatars)
+    }
+
+    @ViewBuilder
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Image(systemName: isDismissThresholdReached ? "chevron.down" : "xmark")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(isDismissThresholdReached ? .white : .primary)
+                .frame(width: 32, height: 32)
+                .padding(10)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassBackground(
+            isDismissThresholdReached ? .tinted(.blue) : .regular,
+            in: .circle,
+            fallback: isDismissThresholdReached ? .ultraThinMaterial : .thinMaterial
+        )
+        .contentShape(Circle())
+        .animation(.easeInOut(duration: 0.15), value: isDismissThresholdReached)
+    }
+}
+
+// MARK: - Comments List Content
+
+/// Comments list states and rows driven by `PlayerState`, shared between the
+/// expanded comments overlay and the details panel comments page.
+struct CommentsListContent: View {
+    @Environment(\.appEnvironment) private var appEnvironment
+
+    let videoID: String
+    var showAvatars: Bool = true
+
+    private var playerState: PlayerState? { appEnvironment?.playerService.state }
+    private var contentService: ContentService? { appEnvironment?.contentService }
+    private var instancesManager: InstancesManager? { appEnvironment?.instancesManager }
+
+    private var comments: [Comment] { playerState?.comments ?? [] }
+    private var commentsState: CommentsLoadState { playerState?.commentsState ?? .idle }
+    private var videoSource: ContentSource? { playerState?.currentVideo?.id.source }
+
+    var body: some View {
         switch commentsState {
         case .idle, .loading:
             HStack {
@@ -276,7 +313,7 @@ struct ExpandedCommentsView: View {
             } else {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(comments) { comment in
-                        CommentView(comment: comment, videoID: videoID, source: videoSource)
+                        CommentView(comment: comment, videoID: videoID, source: videoSource, showAvatar: showAvatars)
                             .onAppear {
                                 if comment.id == comments.last?.id,
                                    playerState?.commentsContinuation != nil,
@@ -307,142 +344,14 @@ struct ExpandedCommentsView: View {
         }
     }
 
-    @ViewBuilder
-    private var closeButton: some View {
-        Button(action: onClose) {
-            Image(systemName: isDismissThresholdReached ? "chevron.down" : "xmark")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(isDismissThresholdReached ? .white : .primary)
-                .frame(width: 32, height: 32)
-                .padding(10)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .glassBackground(
-            isDismissThresholdReached ? .tinted(.blue) : .regular,
-            in: .circle,
-            fallback: isDismissThresholdReached ? .ultraThinMaterial : .thinMaterial
-        )
-        .contentShape(Circle())
-        .animation(.easeInOut(duration: 0.15), value: isDismissThresholdReached)
-    }
-
     private func loadComments() async {
         guard let playerState, let contentService, let instancesManager else { return }
-
-        // Don't load comments for non-YouTube videos
-        guard let video = playerState.currentVideo, video.supportsComments else {
-            playerState.commentsState = .disabled
-            return
-        }
-
-        // Capture the video ID we're loading comments for
-        let requestedVideoID = videoID
-
-        guard let instance = instancesManager.instance(for: video) else { return }
-
-        playerState.commentsState = .loading
-
-        do {
-            let page = try await contentService.comments(videoID: videoID, instance: instance, continuation: nil)
-
-            // Validate player is still on the same video
-            guard !Task.isCancelled,
-                  playerState.currentVideo?.id.videoID == requestedVideoID else { return }
-
-            playerState.comments = page.comments
-            playerState.commentsContinuation = page.continuation
-            playerState.commentsState = .loaded
-        } catch let error as APIError where error == .commentsDisabled {
-            guard !Task.isCancelled,
-                  playerState.currentVideo?.id.videoID == requestedVideoID else { return }
-            playerState.commentsState = .disabled
-        } catch {
-            guard !Task.isCancelled,
-                  playerState.currentVideo?.id.videoID == requestedVideoID else { return }
-            playerState.commentsState = .error
-        }
+        await playerState.loadComments(contentService: contentService, instancesManager: instancesManager)
     }
 
     private func loadMoreComments() async {
         guard let playerState, let contentService, let instancesManager else { return }
-        guard let continuation = playerState.commentsContinuation else { return }
-
-        // Don't load more comments for non-YouTube videos
-        guard let video = playerState.currentVideo, video.supportsComments else {
-            return
-        }
-
-        // Capture the video ID we're loading comments for
-        let requestedVideoID = videoID
-
-        guard let instance = instancesManager.instance(for: video) else { return }
-
-        playerState.commentsState = .loadingMore
-
-        do {
-            let page = try await contentService.comments(videoID: videoID, instance: instance, continuation: continuation)
-
-            // Validate player is still on the same video
-            guard !Task.isCancelled,
-                  playerState.currentVideo?.id.videoID == requestedVideoID else { return }
-
-            playerState.comments.append(contentsOf: page.comments)
-            playerState.commentsContinuation = page.continuation
-            playerState.commentsState = .loaded
-        } catch {
-            guard !Task.isCancelled,
-                  playerState.currentVideo?.id.videoID == requestedVideoID else { return }
-            // Don't change state to error on load more failure
-            playerState.commentsState = .loaded
-        }
-    }
-}
-
-// MARK: - Scroll Fade Overlay
-
-/// A view modifier that applies a gradient fade overlay to the top and bottom edges of a scroll view.
-private struct ScrollFadeOverlayModifier: ViewModifier {
-    let fadeHeight: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .top) {
-                // Top gradient fade
-                LinearGradient(
-                    colors: [backgroundColor, .clear],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: fadeHeight)
-                .allowsHitTesting(false)
-            }
-            .overlay(alignment: .bottom) {
-                // Bottom gradient fade
-                LinearGradient(
-                    colors: [.clear, backgroundColor],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: fadeHeight)
-                .allowsHitTesting(false)
-            }
-    }
-
-    private var backgroundColor: Color {
-        #if os(iOS)
-        Color(.systemBackground)
-        #elseif os(macOS)
-        Color(nsColor: .windowBackgroundColor)
-        #else
-        Color.black
-        #endif
-    }
-}
-
-private extension View {
-    func scrollFadeMask(fadeHeight: CGFloat = 24) -> some View {
-        modifier(ScrollFadeOverlayModifier(fadeHeight: fadeHeight))
+        await playerState.loadMoreComments(contentService: contentService, instancesManager: instancesManager)
     }
 }
 

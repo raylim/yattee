@@ -8,25 +8,13 @@
 import Foundation
 import SwiftUI
 
-/// Status of an instance's connectivity and authentication.
-enum InstanceStatus: Equatable {
-    /// Instance is online and working.
-    case online
-    /// Instance is offline or unreachable.
-    case offline
-    /// Instance requires authentication but credentials are not provided.
-    case authRequired
-    /// Instance authentication failed (wrong credentials).
-    case authFailed
-}
-
 /// Manages the list of configured backend instances with iCloud sync.
 @MainActor
 @Observable
 final class InstancesManager {
     // MARK: - Storage
 
-    private let localDefaults = UserDefaults.standard
+    private let localDefaults: UserDefaults
     private let ubiquitousStore = NSUbiquitousKeyValueStore.default
     private let instancesKey = "configuredInstances"
     private let activeInstanceKey = "activeInstanceID"
@@ -40,13 +28,15 @@ final class InstancesManager {
     private(set) var instances: [Instance] = []
     private(set) var activeInstanceID: UUID?
 
-    /// Current status of each instance, keyed by instance ID.
-    private(set) var instanceStatuses: [UUID: InstanceStatus] = [:]
-
     // MARK: - Initialization
 
-    init(settingsManager: SettingsManager? = nil) {
+    /// - Parameter defaults: where the configured instances are read and
+    ///   written. The app's own defaults, except under test: a manager built on
+    ///   the shared ones edits the list the app on that device is using, which
+    ///   is how test fixtures ended up in it.
+    init(settingsManager: SettingsManager? = nil, defaults: UserDefaults = .standard) {
         self.settingsManager = settingsManager
+        self.localDefaults = defaults
 
         loadInstances()
         loadActiveInstance()
@@ -95,6 +85,12 @@ final class InstancesManager {
 
         // Update sync time
         settingsManager?.updateLastSyncTime()
+
+        // Instances arriving from iCloud are as much a change as a local edit.
+        // Without this, a legacy authenticated instance delivered here never
+        // reaches account migration — the account, and the adoption of its
+        // saved login, would happen only after an unrelated edit or a relaunch.
+        NotificationCenter.default.post(name: .instancesDidChange, object: nil)
     }
 
     /// Syncs local data to iCloud (called when enabling iCloud sync).
@@ -126,6 +122,8 @@ final class InstancesManager {
         instances = iCloudInstances
         localDefaults.set(iCloudData, forKey: instancesKey)
         settingsManager?.updateLastSyncTime()
+
+        NotificationCenter.default.post(name: .instancesDidChange, object: nil)
     }
 
     // MARK: - Public Methods
@@ -159,11 +157,6 @@ final class InstancesManager {
         }
     }
 
-    /// Alias for add method to maintain consistency.
-    func addInstance(_ instance: Instance) {
-        add(instance)
-    }
-
     /// Toggles the enabled state of an instance.
     func toggleEnabled(_ instance: Instance) {
         if let index = instances.firstIndex(where: { $0.id == instance.id }) {
@@ -184,9 +177,13 @@ final class InstancesManager {
         saveInstances()
     }
 
-    /// Records whether the user has logged into an account on an instance.
-    /// Persisted (and synced to iCloud) so missing Keychain credentials can be
-    /// detected after a reinstall.
+    /// Records that a pre-revamp single login existed on an instance.
+    ///
+    /// Migration-only: every caller is migration machinery (a Yattee 1 import,
+    /// the credential backfill, or the last account on the instance going
+    /// away). Signing in deliberately never calls this — accounts describe
+    /// logins now (see `AccountSignInHandler`, and `Instance.usesAccountLogin`
+    /// for who writes it and why).
     func setUsesAccountLogin(_ value: Bool, for instance: Instance) {
         guard let index = instances.firstIndex(where: { $0.id == instance.id }),
               instances[index].usesAccountLogin != value else { return }
@@ -194,37 +191,10 @@ final class InstancesManager {
         saveInstances()
     }
 
-    /// Sets the given instance as the primary (first) instance.
-    func setPrimary(_ instance: Instance) {
-        LoggingService.shared.debug("[InstancesManager] setPrimary called for: \(instance.displayName)", category: .general)
-        LoggingService.shared.debug("[InstancesManager] Current instances: \(instances.map { $0.displayName })", category: .general)
-
-        guard let index = instances.firstIndex(where: { $0.id == instance.id }) else {
-            LoggingService.shared.debug("[InstancesManager] Instance not found in list", category: .general)
-            return
-        }
-
-        if index == 0 {
-            LoggingService.shared.debug("[InstancesManager] Instance already at index 0, skipping", category: .general)
-            return
-        }
-
-        LoggingService.shared.debug("[InstancesManager] Moving instance from index \(index) to 0", category: .general)
-        // Move to front
-        let removed = instances.remove(at: index)
-        instances.insert(removed, at: 0)
-        saveInstances()
-        LoggingService.shared.debug("[InstancesManager] After move: \(instances.map { $0.displayName })", category: .general)
-    }
-
     // MARK: - Computed Properties
 
     var enabledInstances: [Instance] {
         instances.filter(\.isEnabled)
-    }
-
-    var youtubeInstances: [Instance] {
-        instances.filter(\.isYouTubeInstance)
     }
 
     var peertubeInstances: [Instance] {
@@ -247,12 +217,14 @@ final class InstancesManager {
         instances.contains { $0.isYatteeServerInstance }
     }
 
-    var invidiousPipedInstances: [Instance] {
-        instances.filter { $0.type == .invidious || $0.type == .piped }
+    /// Instances whose backend has accounts at all, asked of the capability
+    /// table rather than a type list.
+    var accountCapableInstances: [Instance] {
+        instances.filter { $0.type.accountCapabilities.supportsAccounts }
     }
 
-    var hasInvidiousPipedInstances: Bool {
-        instances.contains { $0.type == .invidious || $0.type == .piped }
+    var hasAccountCapableInstances: Bool {
+        instances.contains { $0.type.accountCapabilities.supportsAccounts }
     }
 
     var enabledYatteeServerInstances: [Instance] {
@@ -264,6 +236,35 @@ final class InstancesManager {
     /// - For YouTube/extracted content: uses YouTube-capable instance (Invidious, Piped, Yattee Server)
     func instance(for video: Video) -> Instance? {
         instance(for: video.id.source)
+    }
+
+    /// Selects the instance to load a remote playlist from: Invidious first for
+    /// YouTube (Invidious playlists are Invidious-specific), the playlist's own
+    /// server for federated content, Yattee Server for extracted content.
+    func playlistInstance(for source: ContentSource) -> Instance? {
+        switch source {
+        case .global:
+            // For global content (YouTube), prefer Invidious instances over Yattee Server
+            // since Invidious playlists (IVPL*) are Invidious-specific
+            if let invidiousInstance = enabledInstances.first(where: { $0.type == .invidious }) {
+                return invidiousInstance
+            }
+            // Fall back to any YouTube-compatible instance
+            return enabledInstances.first(where: { $0.isYouTubeInstance })
+        case .federated(let provider, let instanceURL):
+            // For federated content, find matching instance by URL
+            if let existingInstance = instances.first(where: { $0.url == instanceURL }) {
+                return existingInstance
+            }
+            // If no configured instance matches, create a temporary one for PeerTube
+            if provider == ContentSource.peertubeProvider {
+                return Instance(type: .peertube, url: instanceURL)
+            }
+            return nil
+        case .extracted:
+            // For extracted content, use Yattee Server
+            return yatteeServerInstances.first
+        }
     }
 
     /// Selects an enabled instance appropriate for the given content source.
@@ -280,9 +281,19 @@ final class InstancesManager {
             // Extracted content requires Yattee Server (yt-dlp)
             return yatteeServerInstances.first
         case .global, .federated:
-            // YouTube content - prefer Yattee Server, fall back to other YouTube-capable instances
-            return enabledYatteeServerInstances.first
-                ?? enabledInstances.first(where: \.isYouTubeInstance)
+            // YouTube content - prefer Yattee Server (the active one if it is one),
+            // then the active instance, then any other YouTube-capable instance
+            let active = activeInstance
+            if let active, active.isYatteeServerInstance {
+                return active
+            }
+            if let yatteeServer = enabledYatteeServerInstances.first {
+                return yatteeServer
+            }
+            if let active, active.isYouTubeInstance {
+                return active
+            }
+            return enabledInstances.first(where: \.isYouTubeInstance)
         }
     }
 
@@ -295,49 +306,6 @@ final class InstancesManager {
         }
     }
 
-    // MARK: - Instance Status
-
-    /// Returns the current status of an instance.
-    func status(for instance: Instance) -> InstanceStatus {
-        instanceStatuses[instance.id] ?? .online
-    }
-
-    /// Updates the status of an instance.
-    func updateStatus(_ status: InstanceStatus, for instance: Instance) {
-        instanceStatuses[instance.id] = status
-    }
-
-    /// Updates status based on an API error.
-    func updateStatusFromError(_ error: Error, for instance: Instance) {
-        if let apiError = error as? APIError {
-            switch apiError {
-            case .unauthorized:
-                updateStatus(.authFailed, for: instance)
-            case .noConnection, .timeout:
-                updateStatus(.offline, for: instance)
-            default:
-                // Don't change status for other errors
-                break
-            }
-        } else {
-            // Generic network errors
-            let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain {
-                updateStatus(.offline, for: instance)
-            }
-        }
-    }
-
-    /// Clears the status of an instance (resets to online).
-    func clearStatus(for instance: Instance) {
-        instanceStatuses.removeValue(forKey: instance.id)
-    }
-
-    /// Instances that have auth issues (need attention).
-    var instancesWithAuthIssues: [Instance] {
-        instances.filter { instanceStatuses[$0.id] == .authFailed || instanceStatuses[$0.id] == .authRequired }
-    }
-
     /// The currently active instance for browsing content.
     /// Falls back to the first enabled instance if no active instance is set.
     var activeInstance: Instance? {
@@ -346,21 +314,6 @@ final class InstancesManager {
             return instance
         }
         return enabledInstances.first
-    }
-
-    /// Sets the given instance as the active instance for browsing.
-    func setActive(_ instance: Instance) {
-        guard enabledInstances.contains(where: { $0.id == instance.id }) else { return }
-        activeInstanceID = instance.id
-        saveActiveInstance()
-        NotificationCenter.default.post(name: .activeInstanceDidChange, object: nil)
-    }
-
-    /// Clears the active instance, falling back to the first enabled instance.
-    func clearActiveInstance() {
-        activeInstanceID = nil
-        localDefaults.removeObject(forKey: activeInstanceKey)
-        NotificationCenter.default.post(name: .activeInstanceDidChange, object: nil)
     }
 
     // MARK: - Private Methods
@@ -395,19 +348,10 @@ final class InstancesManager {
             activeInstanceID = uuid
         }
     }
-
-    private func saveActiveInstance() {
-        if let id = activeInstanceID {
-            localDefaults.set(id.uuidString, forKey: activeInstanceKey)
-        } else {
-            localDefaults.removeObject(forKey: activeInstanceKey)
-        }
-    }
 }
 
 // MARK: - Notifications
 
 extension Notification.Name {
     static let instancesDidChange = Notification.Name("stream.yattee.instancesDidChange")
-    static let activeInstanceDidChange = Notification.Name("stream.yattee.activeInstanceDidChange")
 }

@@ -18,10 +18,16 @@ struct MPVRenderViewRepresentable: UIViewRepresentable {
     /// Optional player state to update PiP availability
     var playerState: PlayerState?
 
+    /// Stretch the video to fill the view instead of letterboxing it (the mini
+    /// player's tiny preview, where bars look like a glitch).
+    var fillsFrame = false
+
     func makeUIView(context: Context) -> UIView {
         // Create a container that will hold the actual player view
         let container = MPVContainerView()
         container.backgroundColor = .black
+        container.backend = backend
+        container.fillsFrame = fillsFrame
 
         MPVLogging.log("MPVRenderViewRepresentable.makeUIView: creating container",
             details: "hasPlayerView:\(backend.playerView != nil)")
@@ -52,10 +58,21 @@ struct MPVRenderViewRepresentable: UIViewRepresentable {
     }
 }
 
+extension Notification.Name {
+    /// Posted (synchronously, object: the player view) when a container adopts
+    /// the shared player view — lets the expanded player hide its window in the
+    /// same pass the mini player takes the video over.
+    static let mpvPlayerViewDidChangeContainer = Notification.Name("mpvPlayerViewDidChangeContainer")
+}
+
 /// Container view that properly manages player view swapping
 private class MPVContainerView: UIView {
     private weak var currentPlayerView: UIView?
     private let containerID = UUID()
+
+    /// Applied to the backend whenever this container takes the player view
+    weak var backend: MPVBackend?
+    var fillsFrame = false
 
     // Track all living containers to enable view transfer on deinit
     private static var livingContainers = NSHashTable<MPVContainerView>.weakObjects()
@@ -81,7 +98,7 @@ private class MPVContainerView: UIView {
                 if container !== self && container.window != nil {
                     MPVLogging.log("MPVContainerView deinit: transferring player view to surviving container",
                         details: "from:\(containerID.uuidString.prefix(8)) to:\(container.containerID.uuidString.prefix(8))")
-                    container.setPlayerView(playerView)
+                    container.setPlayerView(playerView, force: true)
                     return
                 }
             }
@@ -99,13 +116,36 @@ private class MPVContainerView: UIView {
         }
     }
 
-    func setPlayerView(_ playerView: UIView) {
+    /// A player view waiting for this container's first layout (see setPlayerView)
+    private weak var pendingPlayerView: UIView?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let playerView = pendingPlayerView, !bounds.isEmpty {
+            pendingPlayerView = nil
+            setPlayerView(playerView, force: true)
+        }
+    }
+
+    /// - Parameter force: adopt now even while this container is still unsized.
+    func setPlayerView(_ playerView: UIView, force: Bool = false) {
         // Skip only if same view AND actually our subview
         // (weak ref can point to a view that's been stolen by another container)
         if playerView === currentPlayerView && playerView.superview === self {
             MPVLogging.log("MPVContainerView.setPlayerView: same view, skipping")
             return
         }
+
+        // A freshly made container is zero-sized until SwiftUI lays it out.
+        // Taking a view that's on screen elsewhere now would show it unsized
+        // (blank) there and leave a black hole where it was, so wait for the
+        // first layout, where it is sized and redrawn in the same frame.
+        if !force && bounds.isEmpty && playerView.window != nil {
+            pendingPlayerView = playerView
+            setNeedsLayout()
+            return
+        }
+        pendingPlayerView = nil
 
         // Check if player view is in another container
         let isInAnotherContainer = playerView.superview is MPVContainerView && playerView.superview !== self
@@ -128,8 +168,15 @@ private class MPVContainerView: UIView {
             playerView.leadingAnchor.constraint(equalTo: leadingAnchor),
             playerView.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])
-
         currentPlayerView = playerView
+        #if os(iOS)
+        backend?.setVideoFillsFrame(fillsFrame)
+        #endif
+        // Size it (and re-render its framebuffer) before anyone reacts to the move
+        if !bounds.isEmpty {
+            layoutIfNeeded()
+        }
+        NotificationCenter.default.post(name: .mpvPlayerViewDidChangeContainer, object: playerView)
     }
 }
 

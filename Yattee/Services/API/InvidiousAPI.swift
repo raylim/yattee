@@ -27,7 +27,8 @@ actor InvidiousAPI: InstanceAPI {
     func popular(instance: Instance) async throws -> [Video] {
         let endpoint = GenericEndpoint.get("/api/v1/popular")
         let response: [InvidiousVideo] = try await httpClient.fetch(endpoint, baseURL: instance.url)
-        return response.map { $0.toVideo(baseURL: instance.url) }
+        // Popular is read from the same RSS-fed table as the subscription feed.
+        return response.map { $0.toVideo(baseURL: instance.url, isShort: $0.isLikelyFeedShort) }
     }
 
     func search(query: String, instance: Instance, page: Int, filters: SearchFilters = .defaults) async throws -> SearchResult {
@@ -116,7 +117,24 @@ actor InvidiousAPI: InstanceAPI {
         return response.toVideo(baseURL: instance.url)
     }
 
+    /// `@handle` channel IDs (youtube.com/@name links) resolved to UC… IDs, per instance.
+    private var resolvedChannelHandles: [String: String] = [:]
+
+    /// Invidious' channel endpoints only take UC… IDs, so a `@handle` is resolved first.
+    private func channelID(for id: String, instance: Instance) async throws -> String {
+        guard id.hasPrefix("@") else { return id }
+        let key = "\(instance.url.absoluteString)|\(id.lowercased())"
+        if let cached = resolvedChannelHandles[key] { return cached }
+
+        let endpoint = GenericEndpoint.get("/api/v1/resolveurl", query: ["url": "https://www.youtube.com/\(id)"])
+        let response: InvidiousResolvedURL = try await httpClient.fetch(endpoint, baseURL: instance.url)
+        guard let ucid = response.ucid, !ucid.isEmpty else { return id }
+        resolvedChannelHandles[key] = ucid
+        return ucid
+    }
+
     func channel(id: String, instance: Instance) async throws -> Channel {
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/api/v1/channels/\(id)")
         let response: InvidiousChannel = try await httpClient.fetch(endpoint, baseURL: instance.url)
         return response.toChannel(baseURL: instance.url)
@@ -127,6 +145,7 @@ actor InvidiousAPI: InstanceAPI {
         if let continuation {
             query["continuation"] = continuation
         }
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/api/v1/channels/\(id)/videos", query: query)
         let response: InvidiousChannelVideosWithContinuation = try await httpClient.fetch(endpoint, baseURL: instance.url)
         return ChannelVideosPage(
@@ -140,6 +159,7 @@ actor InvidiousAPI: InstanceAPI {
         if let continuation {
             query["continuation"] = continuation
         }
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/api/v1/channels/\(id)/playlists", query: query)
         let response: InvidiousChannelPlaylists = try await httpClient.fetch(endpoint, baseURL: instance.url)
         return ChannelPlaylistsPage(
@@ -153,6 +173,7 @@ actor InvidiousAPI: InstanceAPI {
         if let continuation {
             query["continuation"] = continuation
         }
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/api/v1/channels/\(id)/shorts", query: query)
         let response: InvidiousChannelVideosWithContinuation = try await httpClient.fetch(endpoint, baseURL: instance.url)
         return ChannelVideosPage(
@@ -166,6 +187,7 @@ actor InvidiousAPI: InstanceAPI {
         if let continuation {
             query["continuation"] = continuation
         }
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/api/v1/channels/\(id)/streams", query: query)
         let response: InvidiousChannelVideosWithContinuation = try await httpClient.fetch(endpoint, baseURL: instance.url)
         return ChannelVideosPage(
@@ -208,18 +230,23 @@ actor InvidiousAPI: InstanceAPI {
             author: firstResponse.author,
             authorId: firstResponse.authorId,
             videoCount: firstResponse.videoCount,
+            isListed: firstResponse.isListed,
             videos: allVideos
         ).toPlaylist(baseURL: instance.url)
     }
 
-    /// Fetches a user's playlist using authenticated endpoint.
-    /// Required for private playlists (IVPL* IDs).
+    /// Fetches a user's playlist along with the per-entry identities needed to
+    /// mutate it.
+    ///
+    /// Uses the authenticated endpoint (required for private IVPL* playlists)
+    /// and keeps the `index`/`indexId` tokens Invidious
+    /// hands out for every row instead of dropping them on conversion.
     /// - Parameters:
     ///   - id: The playlist ID
     ///   - instance: The Invidious instance
     ///   - sid: The session ID from login
-    /// - Returns: The playlist with videos
-    func userPlaylist(id: String, instance: Instance, sid: String) async throws -> Playlist {
+    /// - Returns: The playlist plus its addressable entries
+    func userPlaylistSnapshot(id: String, instance: Instance, sid: String) async throws -> RemotePlaylistSnapshot {
         let headers = ["Cookie": "SID=\(sid)"]
         let firstEndpoint = GenericEndpoint(
             path: "/api/v1/auth/playlists/\(id)",
@@ -227,7 +254,7 @@ actor InvidiousAPI: InstanceAPI {
             headers: headers
         )
         let firstResponse: InvidiousPlaylist = try await httpClient.fetch(firstEndpoint, baseURL: instance.url)
-        var allVideos = firstResponse.videos ?? []
+        var additionalPages: [InvidiousPlaylist] = []
         let maxPages = 50
 
         if firstResponse.videoCount > 0 {
@@ -239,14 +266,41 @@ actor InvidiousAPI: InstanceAPI {
                     headers: headers
                 )
                 let response: InvidiousPlaylist = try await httpClient.fetch(endpoint, baseURL: instance.url)
-                let pageVideos = response.videos ?? []
-                if pageVideos.isEmpty { break }
-                allVideos.append(contentsOf: pageVideos)
+                if (response.videos ?? []).isEmpty { break }
+                additionalPages.append(response)
                 page += 1
             }
         }
 
-        // Invidious pagination uses overlapping pages — deduplicate by playlist index
+        return Self.buildAuthPlaylistSnapshot(
+            firstPage: firstResponse,
+            additionalPages: additionalPages,
+            playlistID: id,
+            baseURL: instance.url
+        )
+    }
+
+    /// Builds a snapshot from already-fetched pages of
+    /// `/api/v1/auth/playlists/{id}`.
+    ///
+    /// Pure: the network path and ``authPlaylistSnapshot(fromPageJSON:playlistID:baseURL:)``
+    /// both funnel through here, so the merge, dedupe and ordering rules have
+    /// exactly one implementation.
+    private static func buildAuthPlaylistSnapshot(
+        firstPage: InvidiousPlaylist,
+        additionalPages: [InvidiousPlaylist],
+        playlistID: String,
+        baseURL: URL
+    ) -> RemotePlaylistSnapshot {
+        var allVideos = firstPage.videos ?? []
+        for page in additionalPages {
+            allVideos.append(contentsOf: page.videos ?? [])
+        }
+
+        // Invidious pagination uses overlapping pages — deduplicate by playlist
+        // index. The key is deliberately never `videoId`: a playlist may hold
+        // the same video twice at different indexes, and each copy is its own
+        // removable row with its own indexId.
         var seenIndices = Set<Int>()
         allVideos = allVideos.filter { item in
             if case .video(let video) = item, let index = video.index {
@@ -255,15 +309,84 @@ actor InvidiousAPI: InstanceAPI {
             return true
         }
 
-        return InvidiousPlaylist(
-            playlistId: firstResponse.playlistId,
-            title: firstResponse.title,
-            description: firstResponse.description,
-            author: firstResponse.author,
-            authorId: firstResponse.authorId,
-            videoCount: firstResponse.videoCount,
+        // Order by the server's index so entry positions ascend even if a page
+        // arrives out of order. Rows the server left unindexed keep their
+        // arrival order and sort last; the sort is stable either way.
+        allVideos = allVideos.enumerated().sorted { lhs, rhs in
+            switch (lhs.element.playlistIndex, rhs.element.playlistIndex) {
+            case let (left?, right?):
+                return left == right ? lhs.offset < rhs.offset : left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.offset < rhs.offset
+            }
+        }.map(\.element)
+
+        let playlist = InvidiousPlaylist(
+            playlistId: firstPage.playlistId,
+            title: firstPage.title,
+            description: firstPage.description,
+            author: firstPage.author,
+            authorId: firstPage.authorId,
+            videoCount: firstPage.videoCount,
+            isListed: firstPage.isListed,
             videos: allVideos
-        ).toPlaylist(baseURL: instance.url)
+        ).toPlaylist(baseURL: baseURL)
+
+        // A row needs both tokens to be a mutation target: `indexId` names it
+        // and `index` places it. Rows missing either are still displayed —
+        // they stay in `playlist.videos` — they just never appear in `entries`,
+        // so no removal can be aimed at a row the server refuses to name.
+        //
+        // `displayRow` is counted over exactly what `toPlaylist` keeps, so an
+        // entry says which visible row it belongs to without anyone having to
+        // match video ids — which could not tell two rows of the same video
+        // apart anyway.
+        var displayRow = 0
+        var entries: [RemotePlaylistEntry] = []
+        for item in allVideos {
+            guard case .video(let video) = item else { continue }
+            let row = displayRow
+            displayRow += 1
+
+            guard let indexID = video.indexId, let index = video.index else { continue }
+
+            entries.append(
+                RemotePlaylistEntry(
+                    id: .invidious(playlistID: playlistID, indexID: indexID),
+                    video: video.toVideo(baseURL: baseURL),
+                    position: index,
+                    displayRow: row
+                )
+            )
+        }
+
+        return RemotePlaylistSnapshot(playlist: playlist, entries: entries, isListed: firstPage.isListed)
+    }
+
+    /// Runs the snapshot assembly over raw page payloads, decoding them the way
+    /// the network path does. Lets the merge/dedupe/ordering rules be exercised
+    /// without a server.
+    static func authPlaylistSnapshot(
+        fromPageJSON pages: [Data],
+        playlistID: String,
+        baseURL: URL
+    ) throws -> RemotePlaylistSnapshot {
+        let decoder = HTTPClient.makeAPIDecoder()
+        let decoded = try pages.map { try decoder.decode(InvidiousPlaylist.self, from: $0) }
+        guard let firstPage = decoded.first else {
+            throw APIError.decodingError("No playlist pages to decode")
+        }
+
+        return buildAuthPlaylistSnapshot(
+            firstPage: firstPage,
+            additionalPages: Array(decoded.dropFirst()),
+            playlistID: playlistID,
+            baseURL: baseURL
+        )
     }
 
     func comments(videoID: String, instance: Instance, continuation: String?) async throws -> CommentsPage {
@@ -296,6 +419,7 @@ actor InvidiousAPI: InstanceAPI {
     }
 
     func channelSearch(id: String, query: String, instance: Instance, page: Int) async throws -> ChannelSearchPage {
+        let id = try await channelID(for: id, instance: instance)
         let endpoint = GenericEndpoint.get("/api/v1/channels/\(id)/search", query: [
             "q": query,
             "page": String(page)
@@ -319,14 +443,6 @@ actor InvidiousAPI: InstanceAPI {
         // Has more pages if we got results
         let hasResults = !items.isEmpty
         return ChannelSearchPage(items: items, nextPage: hasResults ? page + 1 : nil)
-    }
-
-    /// Fetches video details, streams, and captions in a single API call.
-    /// This is more efficient than calling video(), streams(), and captions() separately
-    /// since they all fetch from the same endpoint.
-    func videoWithStreamsAndCaptions(id: String, instance: Instance) async throws -> (video: Video, streams: [Stream], captions: [Caption]) {
-        let result = try await videoWithStreamsAndCaptionsAndStoryboards(id: id, instance: instance)
-        return (video: result.video, streams: result.streams, captions: result.captions)
     }
 
     func videoWithStreamsAndCaptionsAndStoryboards(id: String, instance: Instance) async throws -> (video: Video, streams: [Stream], captions: [Caption], storyboards: [Storyboard]) {
@@ -477,7 +593,7 @@ actor InvidiousAPI: InstanceAPI {
         
         // Combine notifications and videos arrays - Invidious returns feed items in notifications
         let allVideos = (response.notifications ?? []) + response.videos
-        let videos = allVideos.map { $0.toVideo(baseURL: instance.url) }
+        let videos = allVideos.map { $0.toVideo(baseURL: instance.url, isShort: $0.isLikelyFeedShort) }
         
         LoggingService.shared.debug(
             "Invidious feed: \(response.notifications?.count ?? 0) notifications + \(response.videos.count) videos = \(videos.count) total",
@@ -548,6 +664,237 @@ actor InvidiousAPI: InstanceAPI {
             baseURL: instance.url,
             customHeaders: ["Cookie": "SID=\(sid)"]
         )
+    }
+
+    // MARK: - Playlist Management
+
+    /// Creates a playlist owned by the logged-in user.
+    ///
+    /// Invidious answers 201 with `{"title", "playlistId"}` — not the whole
+    /// playlist — so the returned value carries the new id and the title that
+    /// was asked for, and nothing else. Callers that need the rest refetch.
+    /// - Parameters:
+    ///   - title: The playlist title
+    ///   - privacy: Who may see it. Required by the server, which rejects the
+    ///     request outright when it is missing.
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    /// - Returns: The created playlist, with no videos
+    func createPlaylist(
+        title: String,
+        privacy: PlaylistPrivacy,
+        instance: Instance,
+        sid: String
+    ) async throws -> Playlist {
+        struct CreateRequest: Encodable, Sendable {
+            let title: String
+            let privacy: String
+        }
+
+        struct CreateResponse: Decodable, Sendable {
+            let playlistId: String
+            let title: String?
+        }
+
+        let body = try JSONEncoder().encode(CreateRequest(title: title, privacy: privacy.rawValue))
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/playlists",
+            method: .post,
+            headers: authHeaders(sid: sid),
+            body: body
+        )
+
+        let response: CreateResponse = try await httpClient.fetch(endpoint, baseURL: instance.url)
+        return Playlist(id: .global(response.playlistId), title: response.title ?? title)
+    }
+
+    /// Edits a playlist's title, description or privacy.
+    ///
+    /// The title is sent even when unchanged: Invidious reads it out of the body
+    /// without a default and answers 403 `Missing hash key: "title"` when it is
+    /// absent (measured). The other two fields fall back to what is stored, so
+    /// omitting them is how the server is told to keep them — which is the only
+    /// way to leave a playlist's visibility alone, since the API never says
+    /// which of unlisted and private it currently is. Answers 204 with no body.
+    /// - Parameters:
+    ///   - id: The playlist ID
+    ///   - title: The title to store
+    ///   - description: The description to store, or `nil` to leave it alone
+    ///   - privacy: The visibility to store, or `nil` to leave it alone
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    func updatePlaylist(
+        id: String,
+        title: String,
+        description: String?,
+        privacy: PlaylistPrivacy?,
+        instance: Instance,
+        sid: String
+    ) async throws {
+        struct UpdateRequest: Encodable, Sendable {
+            let title: String
+            /// Omitted from the JSON when nil, which keeps the stored visibility.
+            let privacy: String?
+            /// Omitted from the JSON when nil, which is how the server is told
+            /// to keep the description it already has.
+            let description: String?
+        }
+
+        let body = try JSONEncoder().encode(
+            UpdateRequest(title: title, privacy: privacy?.rawValue, description: description)
+        )
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/playlists/\(id)",
+            method: .patch,
+            headers: authHeaders(sid: sid),
+            body: body
+        )
+
+        try await httpClient.sendRequest(endpoint, baseURL: instance.url)
+    }
+
+    /// Deletes one of the user's playlists. Answers 204 with no body.
+    /// - Parameters:
+    ///   - id: The playlist ID
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    func deletePlaylist(id: String, instance: Instance, sid: String) async throws {
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/playlists/\(id)",
+            method: .delete,
+            headers: authHeaders(sid: sid)
+        )
+        try await httpClient.sendRequest(endpoint, baseURL: instance.url)
+    }
+
+    /// Appends a video to one of the user's playlists.
+    ///
+    /// The 201 response carries the row the server minted, including the
+    /// `indexId` it can later be removed by. It is deliberately not decoded:
+    /// the whole playlist is refetched after every mutation, and a row parsed
+    /// from a response is one more thing that can disagree with the server.
+    /// - Parameters:
+    ///   - playlistID: The playlist to add to
+    ///   - videoID: The video to add
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    func addVideoToPlaylist(
+        playlistID: String,
+        videoID: String,
+        instance: Instance,
+        sid: String
+    ) async throws {
+        struct AddRequest: Encodable, Sendable {
+            let videoId: String
+        }
+
+        let body = try JSONEncoder().encode(AddRequest(videoId: videoID))
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/playlists/\(playlistID)/videos",
+            method: .post,
+            headers: authHeaders(sid: sid),
+            body: body
+        )
+
+        try await httpClient.sendRequest(endpoint, baseURL: instance.url)
+    }
+
+    /// Removes one row from one of the user's playlists.
+    ///
+    /// Addressed by `indexId`, the per-entry token the fetch handed out — never
+    /// by position. The server names the same row by it across refetches, so a
+    /// removal cannot land on whatever moved into that position meanwhile.
+    /// Answers 204 with no body.
+    /// - Parameters:
+    ///   - playlistID: The playlist to remove from
+    ///   - indexID: The entry's `indexId` from ``userPlaylistSnapshot(id:instance:sid:)``
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    func removeVideoFromPlaylist(
+        playlistID: String,
+        indexID: String,
+        instance: Instance,
+        sid: String
+    ) async throws {
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/playlists/\(playlistID)/videos/\(indexID)",
+            method: .delete,
+            headers: authHeaders(sid: sid)
+        )
+        try await httpClient.sendRequest(endpoint, baseURL: instance.url)
+    }
+
+    // MARK: - Watch History
+
+    /// One page of the user's server-side watch history, newest first.
+    ///
+    /// The server answers a bare array of video IDs — no titles, no durations,
+    /// nothing else — so a caller that wants to show them has to hydrate each
+    /// one itself. Past the end the array is empty, which is the only way to
+    /// tell there is no further page.
+    /// - Parameters:
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    ///   - page: 1-based page number
+    ///   - maxResults: How many IDs the page may hold
+    /// - Returns: Video IDs, newest first
+    func watchHistory(
+        instance: Instance,
+        sid: String,
+        page: Int,
+        maxResults: Int
+    ) async throws -> [String] {
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/history",
+            queryItems: [
+                URLQueryItem(name: "page", value: String(page)),
+                URLQueryItem(name: "max_results", value: String(maxResults))
+            ],
+            headers: authHeaders(sid: sid)
+        )
+        let response: [String] = try await httpClient.fetch(endpoint, baseURL: instance.url)
+        return response
+    }
+
+    /// Records a video as watched in the user's server-side history.
+    ///
+    /// Answers 204 with no body, and repeating it is not an error: the server
+    /// moves an ID it already holds back to the front, which is what a re-watch
+    /// should do to the ordering.
+    /// - Parameters:
+    ///   - videoID: The YouTube video ID
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    func markWatched(videoID: String, instance: Instance, sid: String) async throws {
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/history/\(videoID)",
+            method: .post,
+            headers: authHeaders(sid: sid)
+        )
+        try await httpClient.sendRequest(endpoint, baseURL: instance.url)
+    }
+
+    /// Removes one video from the user's server-side history.
+    ///
+    /// Idempotent — an ID the history never held answers 204 just the same.
+    /// - Parameters:
+    ///   - videoID: The YouTube video ID
+    ///   - instance: The Invidious instance
+    ///   - sid: The session ID from login
+    func removeWatched(videoID: String, instance: Instance, sid: String) async throws {
+        let endpoint = GenericEndpoint(
+            path: "/api/v1/auth/history/\(videoID)",
+            method: .delete,
+            headers: authHeaders(sid: sid)
+        )
+        try await httpClient.sendRequest(endpoint, baseURL: instance.url)
+    }
+
+    /// The headers every authenticated write carries. `Content-Type` is set for
+    /// all of them, including the bodiless ones, so a proxy in front of the
+    /// instance cannot guess something else.
+    private nonisolated func authHeaders(sid: String) -> [String: String] {
+        ["Cookie": "SID=\(sid)", "Content-Type": "application/json"]
     }
 }
 
@@ -800,6 +1147,29 @@ private struct InvidiousAuthPlaylistVideo: Decodable, Sendable {
     }
 }
 
+// MARK: - Invidious Sentinels
+
+/// Invidious answers with the moment it replied where it has no upload date:
+/// the row comes back as `"published": <now>, "publishedText": "0 seconds
+/// ago"`, which renders as "in 0 seconds" beside a view count of zero. A
+/// publication that has not happened yet is one the instance does not know.
+enum InvidiousSentinel {
+    /// The date and the text Invidious actually has, both dropped where the
+    /// reading is that stamp.
+    ///
+    /// A premiere is left alone: it is scheduled, so its `published` is meant
+    /// to be a date that has not arrived yet.
+    static func published(_ raw: Int64?, text: String?, isUpcoming: Bool) -> (date: Date?, text: String?) {
+        guard let raw else { return (nil, text) }
+
+        let date = Date(timeIntervalSince1970: TimeInterval(raw))
+        if !isUpcoming, RelativeDateFormatter.isStampedNow(date) {
+            return (nil, nil)
+        }
+        return (date, text)
+    }
+}
+
 // MARK: - Invidious Response Models
 
 /// Response from the authenticated feed endpoint.
@@ -812,6 +1182,9 @@ private struct InvidiousAuthFeedResponse: Decodable, Sendable {
 private struct InvidiousVideo: Decodable, Sendable {
     let videoId: String
     let index: Int?
+    /// Per-entry token from the authenticated playlist endpoints; the handle
+    /// Invidious accepts when removing this exact row.
+    let indexId: String?
     let title: String
     let description: String?
     let author: String
@@ -827,21 +1200,40 @@ private struct InvidiousVideo: Decodable, Sendable {
     let isUpcoming: Bool?
     let premiereTimestamp: Int64?
 
-    nonisolated func toVideo(baseURL: URL) -> Video {
-        Video(
+    /// Whether this subscription-feed or popular entry is most likely a Short.
+    ///
+    /// Invidious builds the feed from the channel's RSS, which lists Shorts, and
+    /// takes each video's length from the channel's Videos tab, which doesn't.
+    /// A Short therefore arrives with no length, and so does a stream or
+    /// premiere, which is why those are ruled out. Only meaningful for
+    /// `/api/v1/auth/feed` and `/api/v1/popular`, which Invidious reads from
+    /// the same table: other lists give zero length for other reasons.
+    var isLikelyFeedShort: Bool {
+        lengthSeconds == 0 && liveNow != true && isUpcoming != true && premiereTimestamp == nil
+    }
+
+    nonisolated func toVideo(baseURL: URL, isShort: Bool? = nil) -> Video {
+        let publishedReading = InvidiousSentinel.published(
+            published,
+            text: publishedText,
+            isUpcoming: isUpcoming ?? false
+        )
+
+        return Video(
             id: .global(videoId),
             title: title,
             description: description,
             author: Author(id: authorId, name: author),
             duration: TimeInterval(lengthSeconds),
-            publishedAt: published.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-            publishedText: publishedText,
+            publishedAt: publishedReading.date,
+            publishedText: publishedReading.text,
             viewCount: viewCount,
             likeCount: likeCount,
             thumbnails: videoThumbnails?.map { $0.toThumbnail(baseURL: baseURL) } ?? [],
             isLive: liveNow ?? false,
             isUpcoming: isUpcoming ?? false,
-            scheduledStartTime: premiereTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            scheduledStartTime: premiereTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            isShort: isShort
         )
     }
 }
@@ -900,6 +1292,11 @@ private struct InvidiousVideoDetails: Decodable, Sendable {
     nonisolated func toVideo(baseURL: URL) -> Video {
         // Convert recommended videos, limiting to 12
         let related: [Video]? = recommendedVideos?.prefix(12).map { $0.toVideo(baseURL: baseURL) }
+        let publishedReading = InvidiousSentinel.published(
+            published,
+            text: publishedText,
+            isUpcoming: isUpcoming ?? false
+        )
 
         return Video(
             id: .global(videoId),
@@ -912,8 +1309,8 @@ private struct InvidiousVideoDetails: Decodable, Sendable {
                 subscriberCount: subscriberCount
             ),
             duration: TimeInterval(lengthSeconds),
-            publishedAt: published.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-            publishedText: publishedText,
+            publishedAt: publishedReading.date,
+            publishedText: publishedReading.text,
             viewCount: viewCount,
             likeCount: likeCount,
             thumbnails: videoThumbnails?.map { $0.toThumbnail(baseURL: baseURL) } ?? [],
@@ -1049,7 +1446,9 @@ private struct InvidiousRecommendedVideo: Decodable, Sendable {
             id: .global(videoId),
             title: title,
             description: nil,
-            author: Author(id: authorId, name: author),
+            // An empty authorId (unlinked recommendation author) can't open a
+            // channel, so it hides Go to Channel instead of failing to load.
+            author: Author(id: authorId, name: author, hasRealChannelInfo: !authorId.isEmpty),
             duration: TimeInterval(lengthSeconds),
             publishedAt: nil,
             publishedText: nil,
@@ -1452,10 +1851,6 @@ private struct InvidiousChannel: Decodable, Sendable {
     }
 }
 
-private struct InvidiousChannelVideos: Decodable, Sendable {
-    let videos: [InvidiousVideo]
-}
-
 private struct InvidiousChannelVideosWithContinuation: Decodable, Sendable {
     let videos: [InvidiousVideo]
     let continuation: String?
@@ -1525,6 +1920,15 @@ private enum InvidiousPlaylistItem: Decodable, Sendable {
             self = .unknown
         }
     }
+
+    /// The playlist index of the wrapped video, when the item is a video the
+    /// server indexed.
+    var playlistIndex: Int? {
+        if case .video(let video) = self {
+            return video.index
+        }
+        return nil
+    }
 }
 
 private struct InvidiousPlaylist: Decodable, Sendable {
@@ -1534,6 +1938,9 @@ private struct InvidiousPlaylist: Decodable, Sendable {
     let author: String?
     let authorId: String?
     let videoCount: Int
+    /// The whole of what Invidious says about visibility: `privacy.public?`,
+    /// serialised. Unlisted and private are both `false` and indistinguishable.
+    let isListed: Bool?
     let videos: [InvidiousPlaylistItem]?
 
     nonisolated func toPlaylist(baseURL: URL) -> Playlist {
@@ -1567,6 +1974,8 @@ private struct InvidiousComment: Decodable, Sendable {
     let author: String
     let authorId: String
     let authorThumbnails: [InvidiousThumbnail]?
+    /// Newer Invidious versions send a single avatar URL instead of `authorThumbnails`.
+    let authorThumbnail: String?
     let authorIsChannelOwner: Bool?
     let content: String
     let published: Int64?
@@ -1577,6 +1986,17 @@ private struct InvidiousComment: Decodable, Sendable {
     let creatorHeart: InvidiousCreatorHeart?
     let replies: InvidiousCommentReplies?
 
+    nonisolated private func authorThumbnailURL(baseURL: URL) -> URL? {
+        guard let authorThumbnail, !authorThumbnail.isEmpty else { return nil }
+        if authorThumbnail.hasPrefix("//") {
+            return URL(string: "https:" + authorThumbnail)
+        }
+        if authorThumbnail.hasPrefix("/") {
+            return URL(string: authorThumbnail, relativeTo: baseURL)?.absoluteURL
+        }
+        return URL(string: authorThumbnail)
+    }
+
     nonisolated func toComment(baseURL: URL) -> Comment {
         Comment(
             id: commentId,
@@ -1584,6 +2004,7 @@ private struct InvidiousComment: Decodable, Sendable {
                 id: authorId,
                 name: author,
                 thumbnailURL: authorThumbnails?.first?.thumbnailURL(baseURL: baseURL)
+                    ?? authorThumbnailURL(baseURL: baseURL)
             ),
             content: content,
             publishedAt: published.map { Date(timeIntervalSince1970: TimeInterval($0)) },
@@ -1692,4 +2113,9 @@ private struct InvidiousSearchPlaylist: Decodable, Sendable {
 private struct InvidiousSuggestions: Decodable, Sendable {
     let query: String
     let suggestions: [String]
+}
+
+/// Response of `/api/v1/resolveurl`.
+private struct InvidiousResolvedURL: Decodable, Sendable {
+    let ucid: String?
 }

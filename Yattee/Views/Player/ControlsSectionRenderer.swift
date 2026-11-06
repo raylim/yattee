@@ -11,6 +11,8 @@ import SwiftUI
 
 /// Renders a horizontal row of control buttons based on layout configuration.
 struct ControlsSectionRenderer: View {
+    @Environment(\.appEnvironment) private var appEnvironment
+
     let section: LayoutSection
     let actions: PlayerControlsActions
     let globalSettings: GlobalLayoutSettings
@@ -48,6 +50,7 @@ struct ControlsSectionRenderer: View {
     @State private var isBrightnessExpanded = false
 
     var body: some View {
+        let _ = PerfCounter.body("ControlsSectionRenderer")
         HStack {
             ForEach(section.visibleButtons(isWideLayout: actions.isWideScreenLayout)) { config in
                 renderButton(config)
@@ -132,8 +135,8 @@ struct ControlsSectionRenderer: View {
             }
 
         case .orientationLock:
-            // Only on iPhone (not iPad)
-            if !actions.isIPad, actions.onToggleOrientationLock != nil {
+            // Only where rotation is under the app's control (not iPad, not Duo interior)
+            if !actions.usesRotationFreeFullscreen, actions.onToggleOrientationLock != nil {
                 controlButton(
                     systemImage: actions.orientationLockIcon,
                     tint: actions.isOrientationLocked ? .red : .white
@@ -458,7 +461,7 @@ struct ControlsSectionRenderer: View {
 
     /// Brightness icon image using variable value SF Symbol.
     private var brightnessImage: Image {
-        Image(systemName: "sun.max.fill", variableValue: UIScreen.main.brightness)
+        Image(systemName: "sun.max.fill", variableValue: PlayerBrightness.value(for: actions.screen))
     }
 
     /// Panel toggle button content with glass background support.
@@ -621,13 +624,13 @@ struct ControlsSectionRenderer: View {
 
                 switch format {
                 case .currentOnly:
-                    Text(playerState.formattedCurrentTime)
+                    Text(formattedCurrentTime)
                         .font(timeFont)
                         .foregroundStyle(.white)
 
                 case .currentAndTotal:
                     HStack(spacing: 0) {
-                        Text(playerState.formattedCurrentTime)
+                        Text(formattedCurrentTime)
                             .font(timeFont)
                             .foregroundStyle(.white)
 
@@ -643,7 +646,7 @@ struct ControlsSectionRenderer: View {
                 case .currentAndTotalExcludingSponsor:
                     // TODO: Calculate SponsorBlock-adjusted duration
                     HStack(spacing: 0) {
-                        Text(playerState.formattedCurrentTime)
+                        Text(formattedCurrentTime)
                             .font(timeFont)
                             .foregroundStyle(.white)
 
@@ -658,7 +661,7 @@ struct ControlsSectionRenderer: View {
 
                 case .currentAndRemaining:
                     HStack(spacing: 0) {
-                        Text(playerState.formattedCurrentTime)
+                        Text(formattedCurrentTime)
                             .font(timeFont)
                             .foregroundStyle(.white)
 
@@ -674,7 +677,7 @@ struct ControlsSectionRenderer: View {
                 case .currentAndRemainingExcludingSponsor:
                     // TODO: Calculate SponsorBlock-adjusted remaining
                     HStack(spacing: 0) {
-                        Text(playerState.formattedCurrentTime)
+                        Text(formattedCurrentTime)
                             .font(timeFont)
                             .foregroundStyle(.white)
 
@@ -694,8 +697,18 @@ struct ControlsSectionRenderer: View {
         .truncationMode(.middle)
     }
 
+    /// Current time for the time display. Read untracked while the controls
+    /// are hidden so the invisible labels aren't re-rendered on every time update.
+    private var displayedCurrentTime: TimeInterval {
+        controlsVisible ? actions.playerState.currentTime : actions.playerState.untrackedCurrentTime
+    }
+
+    private var formattedCurrentTime: String {
+        displayedCurrentTime.formattedAsTimestamp
+    }
+
     private var formattedRemainingTime: String {
-        let remaining = max(0, actions.playerState.duration - actions.playerState.currentTime)
+        let remaining = max(0, actions.playerState.duration - displayedCurrentTime)
         return remaining.formattedAsTimestamp
     }
 
@@ -794,9 +807,9 @@ struct ControlsSectionRenderer: View {
             if effectiveBehavior == .alwaysVisible || isBrightnessExpanded {
                 Slider(
                     value: Binding(
-                        get: { UIScreen.main.brightness },
+                        get: { PlayerBrightness.value(for: actions.screen) },
                         set: { newValue in
-                            UIScreen.main.brightness = newValue
+                            PlayerBrightness.set(newValue, for: actions.screen)
                         }
                     ),
                     in: 0...1,
@@ -925,7 +938,7 @@ struct ControlsSectionRenderer: View {
     @ViewBuilder
     private var shareButton: some View {
         if let video = actions.currentVideo {
-            ShareLink(item: video.shareURL) {
+            ShareLink(item: appEnvironment?.shareURL(for: video) ?? video.shareURL) {
                 buttonContent(systemImage: "square.and.arrow.up", tint: .white)
             }
         }

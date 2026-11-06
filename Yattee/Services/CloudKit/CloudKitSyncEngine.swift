@@ -53,6 +53,19 @@ private enum ApplyRecordResult {
     case failed
 }
 
+/// Whether the current task is running inside a `CKSyncEngineDelegate`
+/// callback.
+///
+/// CloudKit traps, in release builds, on a call back into the engine from
+/// inside one of its own event callbacks — `fetchChanges()` or `sendChanges()`
+/// — and reads "inside the callback" from exactly this kind of task-local, so a
+/// plain `Task { }` spawned there inherits the trap while a `Task.detached`
+/// escapes it. That is what killed the app a second after the push in the S14
+/// campaign, and it is invisible until it happens on someone's device.
+enum CloudKitDelegateScope {
+    @TaskLocal static var isHandlingEvent = false
+}
+
 /// Main CloudKit sync engine that manages bidirectional sync between local SwiftData and iCloud.
 @MainActor
 @Observable
@@ -129,8 +142,29 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     /// UserDefaults key for CloudKit sync state.
     private let syncStateKey = "cloudKitSyncState"
 
+    /// Durable note that the zone was deleted on the server and this device has
+    /// not finished answering it.
+    private let zoneRecovery = CloudKitZoneRecoveryMarker()
+
+    /// Counts state updates as the engine hands them over, before they reach
+    /// the main actor — see ``ZoneRecoveryDeliveryCounter``.
+    private nonisolated let stateUpdateDeliveries = ZoneRecoveryDeliveryCounter()
+
+    /// Whether the last answer to a zone deletion could not speak for the
+    /// accounts, and is owed a second attempt once they arrive.
+    ///
+    /// Distinct from the marker still being pending: a re-seed that registered
+    /// everything keeps its marker until the engine serializes the work, and
+    /// redoing *that* would only disarm it and start over.
+    private var zoneRecoveryAwaitsAccounts = false
+
     /// UserDefaults key for the record schema version this app last synced with.
     private let lastSchemaVersionKey = "cloudKitLastSchemaVersion"
+
+    /// A recreated store is answered once per launch; later engine setups in
+    /// the same session (manual refresh, account change) start from the tokens
+    /// that full fetch produced.
+    private var storeLossHandled = false
     
     /// Legacy UserDefaults key for pending save record names (pre state-driven
     /// engine). Only read once for migration, then removed.
@@ -225,7 +259,38 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     /// Player controls layout service for importing/removing presets from CloudKit.
     /// Set after initialization to use shared instance instead of creating new ones.
     weak var playerControlsLayoutService: PlayerControlsLayoutService?
-    
+
+    /// Drives the account category: accounts, migration markers, deletion
+    /// tombstones and the selected data context. Set after initialization, and
+    /// nil in tests that only exercise the SwiftData categories.
+    var accountSync: AccountSyncCoordinator? {
+        didSet { wireZoneRecoveryRetry() }
+    }
+
+    /// Asks the accounts to say when they become readable again, so a recovery
+    /// that could not speak for them is answered as soon as they arrive.
+    ///
+    /// Without this the marker simply waits: the accounts finish loading, and
+    /// nothing looks at it again until the next `setupSyncEngine()` — which,
+    /// on a device left running, may be the next launch.
+    private func wireZoneRecoveryRetry() {
+        accountSync?.onAccountsBecameReadable = { [weak self] in
+            // Only a recovery that was *refused*, never one that is merely
+            // waiting for the engine to serialize what it registered. This
+            // notification fires for every account edit, and redoing an armed
+            // re-seed on each one would disarm it and start it over.
+            guard let self, self.zoneRecoveryAwaitsAccounts else { return }
+
+            // Detached, not a plain `Task`: the notification behind this is
+            // posted from inside the sync-engine delegate's callback tree when
+            // fetched account records are applied, and an unstructured task
+            // would inherit that scope and carry the recovery back into it.
+            Task.detached { [weak self] in
+                await self?.resumeZoneRecoveryIfNeeded()
+            }
+        }
+    }
+
     // MARK: - Initialization
     
     init(
@@ -246,6 +311,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
             self.container = container
             self.database = database
             self.zoneManager = CloudKitZoneManager(database: database)
+            LoggingService.shared.logCloudKit("CloudKit environment: \(AppIdentifiers.iCloudEnvironment)")
         } else {
             LoggingService.shared.logCloudKit("iCloud container entitlement missing (re-signed build) - CloudKit sync unavailable")
             self.container = nil
@@ -303,6 +369,10 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         conflictResolvedRecords.removeAll()
         retryCount.removeAll()
         deferredPlaylistItems.removeAll()
+        // The account outbox, staging and bootstrap flag are deliberately left
+        // alone: they are the durable record of what still has to happen, and
+        // re-enabling sync must resume rather than start over.
+        accountSync?.detach()
         syncEngine = nil
         updatePendingCount()
         isSyncing = false
@@ -360,6 +430,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
             // re-delivered on a full fetch, so a schema upgrade must invalidate the
             // persisted state once to pick them up.
             invalidateSyncStateAfterSchemaUpgradeIfNeeded()
+            invalidateSyncStateAfterStoreLossIfNeeded()
 
             // Resume from persisted sync state so launches fetch only changes since
             // the last session instead of replaying the entire zone change history.
@@ -386,6 +457,20 @@ final class CloudKitSyncEngine: @unchecked Sendable {
                 pendingChangesBuffer.removeAll()
             }
 
+            // Accounts activate before the first sync: the bootstrap fetch has
+            // to complete before anything is uploaded, or a device upgrading
+            // from the previous release would publish its unmerged local list
+            // over records it has not seen yet.
+            accountSync?.attach(
+                database: database,
+                discardingCachedRecords: { [weak self] in
+                    self?.discardConflictResolvedAccountRecords()
+                }
+            ) { [weak self] changes in
+                self?.addPendingChanges(changes)
+            }
+            await accountSync?.activate()
+
             if accountChanged {
                 LoggingService.shared.logCloudKit("CloudKit sync engine initialized with new account (fresh sync state)")
             } else {
@@ -397,10 +482,21 @@ final class CloudKitSyncEngine: @unchecked Sendable {
 
             loadDeferredItems()
             updatePendingCount()
-            
+
+            // A zone deletion noticed in an earlier run may not have been
+            // answered in full — the marker outlives whatever interrupted it,
+            // and this is the first point where the engine exists and the
+            // accounts are loaded, outside any delegate callback.
+            //
+            // Deliberately last: everything above puts work *into* the engine —
+            // the buffered changes, the legacy pending-change migration, the
+            // deferred playlist items — and a resumed purge has to be able to
+            // drop what it is not allowed to resend, including all of that.
+            await resumeZoneRecoveryIfNeeded()
+
             // Perform initial sync
             await sync()
-            
+
         } catch {
             LoggingService.shared.logCloudKitError("Failed to setup sync engine", error: error)
             syncError = error
@@ -470,6 +566,13 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         // Clear deferred playlist items (they belong to the old account context)
         clearDeferredItems()
 
+        // The zone a recovery was answering belonged to the account being left.
+        // Replayed against the next one's namespace it answers a wipe that
+        // never happened there — and a pending purge would drop that identity's
+        // staged accounts and its outbox on the way in.
+        zoneRecovery.forget()
+        zoneRecoveryAwaitsAccounts = false
+
         // Clear any existing sync engine
         syncEngine = nil
         updatePendingCount()
@@ -494,6 +597,21 @@ final class CloudKitSyncEngine: @unchecked Sendable {
             LoggingService.shared.logCloudKit("Schema version upgraded (\(storedVersion) -> \(currentVersion)), cleared sync state for full re-fetch")
         }
         UserDefaults.standard.set(Int(currentVersion), forKey: lastSchemaVersionKey)
+    }
+
+    /// Clears persisted sync state when the local store was recreated from
+    /// scratch while the tokens survived. The store lives in Library/Caches on
+    /// tvOS, which the system may purge; the tokens live in UserDefaults and
+    /// do not go with it. An incremental fetch against an empty store only
+    /// brings back records changed since the tokens, so the first sync after
+    /// a loss must be a full fetch.
+    private func invalidateSyncStateAfterStoreLossIfNeeded() {
+        guard !storeLossHandled, dataManager?.storeWasCreated == true else { return }
+        storeLossHandled = true
+        guard UserDefaults.standard.data(forKey: syncStateKey) != nil else { return }
+        UserDefaults.standard.removeObject(forKey: syncStateKey)
+        clearDeferredItems()
+        LoggingService.shared.logCloudKit("Local store was recreated while sync state persisted, cleared sync state for full re-fetch")
     }
 
     /// Loads persisted sync state from disk.
@@ -560,9 +678,36 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     private var canSyncControlsPresets: Bool {
         isSyncEnabled && (settingsManager?.syncSettings ?? true)
     }
+
+    /// Whether account sync is enabled. Accounts ride the instances category:
+    /// they describe logins on those instances, and the two are useless apart.
+    var canSyncAccounts: Bool {
+        isSyncEnabled && (settingsManager?.syncInstances ?? true)
+    }
     
+    /// Fails the build's own tests, and a developer's run, if the engine is
+    /// about to be re-entered from inside one of its delegate callbacks.
+    ///
+    /// Release behaviour is unchanged: CloudKit's own trap is what users would
+    /// meet, and adding a second one here would only change which line the
+    /// crash names. This is here so the trap is met by whoever wrote the call
+    /// instead — a plain `Task { }` in a delegate path is enough to inherit it,
+    /// and nothing about the call site says so.
+    private nonisolated func assertNotInsideDelegateEvent(_ call: String) {
+        #if DEBUG
+        if CloudKitDelegateScope.isHandlingEvent {
+            assertionFailure(
+                "\(call) was reached from inside a CKSyncEngine delegate callback. "
+                    + "Register changes in the engine's state instead, or escape the callback with Task.detached."
+            )
+        }
+        #endif
+    }
+
     /// Manually trigger a full sync.
     func sync() async {
+        assertNotInsideDelegateEvent("sync()")
+
         guard isSyncEnabled, let syncEngine else {
             LoggingService.shared.logCloudKit("Sync skipped: sync disabled or engine not ready")
             return
@@ -628,11 +773,24 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     /// Upload all existing local subscriptions to CloudKit (for initial sync).
     /// Call this when enabling iCloud sync for the first time.
     func uploadAllLocalSubscriptions() async {
+        guard enqueueAllLocalSubscriptions() else { return }
+        // Trigger immediate sync (no debounce for initial upload)
+        await sync()
+    }
+
+    /// Registers every local subscription for upload without sending.
+    ///
+    /// The registration half of `uploadAllLocalSubscriptions()`, for callers
+    /// that must not re-enter the engine — a sync-engine delegate callback may
+    /// mutate engine state but may not ask the engine to fetch or send.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalSubscriptions() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Subscriptions"
         
@@ -643,7 +801,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         
         guard !subscriptions.isEmpty else {
             LoggingService.shared.logCloudKit("No local subscriptions to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -657,9 +815,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(subscriptions.count) existing subscriptions for initial upload")
-        
-        // Trigger immediate sync (no debounce for initial upload)
-        await sync()
+        return true
     }
     
     // MARK: - WatchEntry Sync Operations
@@ -700,11 +856,20 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     /// Upload all existing local watch history to CloudKit (for initial sync).
     /// Call this when enabling iCloud sync for the first time.
     func uploadAllLocalWatchHistory() async {
+        guard enqueueAllLocalWatchHistory() else { return }
+        // Trigger immediate sync (no debounce for initial upload)
+        await sync()
+    }
+
+    /// Registers all local watch history for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalWatchHistory() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Watch History"
         
@@ -716,7 +881,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
 
         guard !watchHistory.isEmpty else {
             LoggingService.shared.logCloudKit("No local watch history to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -728,9 +893,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(watchHistory.count) existing watch entries for initial upload")
-        
-        // Trigger immediate sync (no debounce for initial upload)
-        await sync()
+        return true
     }
     
     // MARK: - Bookmark Sync Operations
@@ -756,11 +919,20 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     /// Upload all existing local bookmarks to CloudKit (for initial sync).
     /// Call this when enabling iCloud sync for the first time.
     func uploadAllLocalBookmarks() async {
+        guard enqueueAllLocalBookmarks() else { return }
+        // Trigger immediate sync (no debounce for initial upload)
+        await sync()
+    }
+
+    /// Registers all local bookmarks for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalBookmarks() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Bookmarks"
         
@@ -771,7 +943,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         
         guard !bookmarks.isEmpty else {
             LoggingService.shared.logCloudKit("No local bookmarks to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -783,9 +955,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(bookmarks.count) existing bookmarks for initial upload")
-        
-        // Trigger immediate sync (no debounce for initial upload)
-        await sync()
+        return true
     }
     
     // MARK: - Playlist Sync Operations
@@ -827,11 +997,19 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     
     /// Upload all existing local playlists to CloudKit (for initial sync).
     func uploadAllLocalPlaylists() async {
+        guard enqueueAllLocalPlaylists() else { return }
+        await sync()
+    }
+
+    /// Registers all local playlists and their items for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalPlaylists() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Playlists"
         
@@ -840,7 +1018,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         let playlists = dataManager.playlists()
         guard !playlists.isEmpty else {
             LoggingService.shared.logCloudKit("No local playlists to upload")
-            return
+            return false
         }
         
         // Register all playlists and their items with the sync engine
@@ -860,7 +1038,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         uploadProgress?.totalOperations += playlists.count + totalItems
         
         LoggingService.shared.logCloudKit("Queued \(playlists.count) existing playlists for initial upload")
-        await sync()
+        return true
     }
     
     // MARK: - SearchHistory Sync Operations
@@ -885,11 +1063,19 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     
     /// Upload all existing local search history to CloudKit (for initial sync).
     func uploadAllLocalSearchHistory() async {
+        guard enqueueAllLocalSearchHistory() else { return }
+        await sync()
+    }
+
+    /// Registers all local search history for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalSearchHistory() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Search History"
         
@@ -898,7 +1084,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         let searchHistory = dataManager.allSearchHistory()
         guard !searchHistory.isEmpty else {
             LoggingService.shared.logCloudKit("No local search history to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -910,7 +1096,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(searchHistory.count) search history entries for initial upload")
-        await sync()
+        return true
     }
     
     // MARK: - RecentChannel Sync Operations
@@ -935,11 +1121,19 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     
     /// Upload all existing recent channels to CloudKit (for initial sync).
     func uploadAllRecentChannels() async {
+        guard enqueueAllRecentChannels() else { return }
+        await sync()
+    }
+
+    /// Registers all recent channels for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllRecentChannels() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Recent Channels"
         
@@ -948,7 +1142,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         let recentChannels = dataManager.allRecentChannels()
         guard !recentChannels.isEmpty else {
             LoggingService.shared.logCloudKit("No recent channels to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -960,7 +1154,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(recentChannels.count) recent channels for initial upload")
-        await sync()
+        return true
     }
     
     // MARK: - RecentPlaylist Sync Operations
@@ -985,11 +1179,19 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     
     /// Upload all existing recent playlists to CloudKit (for initial sync).
     func uploadAllRecentPlaylists() async {
+        guard enqueueAllRecentPlaylists() else { return }
+        await sync()
+    }
+
+    /// Registers all recent playlists for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllRecentPlaylists() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Recent Playlists"
         
@@ -998,7 +1200,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         let recentPlaylists = dataManager.allRecentPlaylists()
         guard !recentPlaylists.isEmpty else {
             LoggingService.shared.logCloudKit("No recent playlists to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -1010,7 +1212,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(recentPlaylists.count) recent playlists for initial upload")
-        await sync()
+        return true
     }
     
     // MARK: - ChannelNotificationSettings Sync Operations
@@ -1024,22 +1226,15 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         LoggingService.shared.logCloudKit("Queued channel notification settings save: \(settings.channelID)")
     }
 
-    /// Queue channel notification settings deletion for sync (debounced).
-    func queueChannelNotificationSettingsDelete(channelID: String, scope: SourceScope) {
-        guard canSyncSubscriptions else { return }
-
-        let recordID = SyncableRecordType.channelNotificationSettings(channelID: channelID, scope: scope).recordID(in: zone)
-        addPendingChanges([.deleteRecord(recordID)])
-        LoggingService.shared.logCloudKit("Queued channel notification settings delete: \(channelID)")
-    }
-    
-    /// Upload all existing channel notification settings to CloudKit (for initial sync).
-    func uploadAllLocalChannelNotificationSettings() async {
+    /// Registers all channel notification settings for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalChannelNotificationSettings() -> Bool {
         guard isSyncEnabled, let dataManager else {
             LoggingService.shared.logCloudKit("Cannot upload: sync disabled or data manager unavailable")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Notification Settings"
         
@@ -1048,7 +1243,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         let allSettings = dataManager.allChannelNotificationSettings()
         guard !allSettings.isEmpty else {
             LoggingService.shared.logCloudKit("No channel notification settings to upload")
-            return
+            return false
         }
         
         // Track total operations
@@ -1060,18 +1255,26 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(allSettings.count) channel notification settings for initial upload")
-        await sync()
+        return true
     }
     
     // MARK: - ControlsPreset Sync Operations
     
     /// Upload all local controls presets to CloudKit (for initial sync when enabling category).
     func uploadAllLocalControlsPresets() async {
+        guard await enqueueAllLocalControlsPresets() else { return }
+        await sync()
+    }
+
+    /// Registers all local controls presets for upload without sending.
+    /// - Returns: whether anything was registered.
+    @discardableResult
+    private func enqueueAllLocalControlsPresets() async -> Bool {
         guard canSyncControlsPresets else {
             LoggingService.shared.logCloudKit("Cannot upload controls presets: sync disabled or settings category disabled")
-            return
+            return false
         }
-        
+
         // Update progress
         uploadProgress?.currentCategory = "Controls Presets"
         
@@ -1082,7 +1285,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
 
         guard !presets.isEmpty else {
             LoggingService.shared.logCloudKit("No controls presets to upload")
-            return
+            return false
         }
 
         // Track total operations
@@ -1094,7 +1297,7 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         addPendingChanges(changes, debounce: false)
 
         LoggingService.shared.logCloudKit("Queued \(presets.count) controls presets for upload")
-        await sync()
+        return true
     }
     
     /// Queue a controls preset for sync (debounced).
@@ -1207,6 +1410,8 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     /// Fetch remote changes from CloudKit. Used when the app returns to foreground
     /// to catch any changes that may have been missed (e.g. dropped push notifications).
     func fetchRemoteChanges() async {
+        assertNotInsideDelegateEvent("fetchRemoteChanges()")
+
         guard isSyncEnabled, let syncEngine else {
             if !isSyncEnabled {
                 LoggingService.shared.logCloudKit("fetchRemoteChanges skipped: sync disabled")
@@ -1425,27 +1630,49 @@ final class CloudKitSyncEngine: @unchecked Sendable {
 
         LoggingService.shared.logCloudKit("Refreshing sync state (clearing local tokens)...")
 
+        // Unsent local changes live in the engine state being discarded below;
+        // carry them over so a refresh never drops queued saves or deletions.
+        let unsentChanges = (syncEngine?.state.pendingRecordZoneChanges ?? []) + pendingChangesBuffer
+
         // Clear local sync state so CKSyncEngine fetches everything fresh
         UserDefaults.standard.removeObject(forKey: syncStateKey)
 
         // Tear down existing engine
         debounceTimer?.invalidate()
         debounceTimer = nil
-        pendingChangesBuffer.removeAll()
         conflictResolvedRecords.removeAll()
         retryCount.removeAll()
         syncEngine = nil
+        pendingChangesBuffer = unsentChanges
         updatePendingCount()
 
         // Reinitialize - with the persisted state cleared above, setup starts
-        // from nil state serialization (forces full fetch)
+        // from nil state serialization (forces full fetch). Setup hands the
+        // carried-over buffer to the new engine.
         await setupSyncEngine()
+
+        if !unsentChanges.isEmpty {
+            LoggingService.shared.logCloudKit("Refresh sync carried over \(unsentChanges.count) unsent changes")
+            updatePendingCount()
+            scheduleDebounceSync()
+        }
 
         LoggingService.shared.logCloudKit("Refresh sync completed")
     }
 
     /// Clear all sync state and reset. For testing/debugging only.
+    ///
+    /// Refused while sync is off. Everything after the zone deletion runs
+    /// through `setupSyncEngine()` and `performInitialUpload()`, both of which
+    /// stop at the same disabled toggle — so with sync off this would delete
+    /// the zone, recreate it empty, and then tell the user their local data had
+    /// been re-uploaded into it.
     func resetSync() async throws {
+        guard isSyncEnabled else {
+            LoggingService.shared.logCloudKit("Reset refused: iCloud sync is turned off, nothing would be re-uploaded")
+            throw CloudKitError.syncDisabled
+        }
+
         guard let zoneManager else { return }
 
         // Delete zone (and all records)
@@ -1464,10 +1691,16 @@ final class CloudKitSyncEngine: @unchecked Sendable {
         
         // Recreate zone
         try await zoneManager.createZoneIfNeeded()
-        
+
         // Reinitialize sync engine
         await setupSyncEngine()
-        
+
+        // And put the local data back. The confirmation this action shows says
+        // the data "has been re-uploaded"; until now nothing was, and the
+        // device performing the reset left the zone as empty as the devices
+        // watching it.
+        await performInitialUpload()
+
         LoggingService.shared.logCloudKit("Sync reset completed")
     }
     
@@ -1534,28 +1767,86 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     }
     
     // MARK: - Initial Upload Coordination
-    
+
+    /// Re-registers every account record for upload.
+    ///
+    /// Used when the zone is being seeded or reseeded — enabling sync, or
+    /// recreating the zone after it was deleted elsewhere. The account outbox
+    /// normally tracks only what changed, which is not enough when the server
+    /// has nothing at all.
+    /// Deliberately not gated on the category being enabled: the zone can be
+    /// deleted while account sync is off, and marking the records dirty is what
+    /// lets re-enabling restore them. The outbox is durable and nothing is sent
+    /// while the category is off, so priming it costs nothing.
+    /// - Returns: whether the outbox was actually re-primed. It is not when the
+    ///   accounts in memory belong to another identity, or to none — the
+    ///   re-seed that asked for this has to be retried rather than considered
+    ///   done. A build with no account sync at all owes nothing and is done.
+    @discardableResult
+    func uploadAllAccounts() -> Bool {
+        uploadProgress?.currentCategory = "Accounts"
+        return accountSync?.uploadEverything() ?? true
+    }
+
+    /// Registers every category of local data for upload, in re-seed order,
+    /// without asking the engine to send anything.
+    ///
+    /// This is the half of the initial upload a `CKSyncEngineDelegate` callback
+    /// may run: it only mutates engine state, which the engine drains on its
+    /// own schedule. Asking the engine to fetch or send from inside one of its
+    /// event callbacks is a programmer error CloudKit traps on.
+    /// - Returns: whether every category registered what it owed.
+    @discardableResult
+    private func enqueueFullUpload() async -> Bool {
+        var complete = true
+
+        for category in ReseedCategory.reseedOrder {
+            switch category {
+            case .accounts:
+                // The one category whose registration can be refused, and the
+                // one that must not be quietly skipped: it carries the logins,
+                // the tombstones and the selected context.
+                complete = uploadAllAccounts() && complete
+            case .subscriptions:
+                enqueueAllLocalSubscriptions()
+            case .watchHistory:
+                enqueueAllLocalWatchHistory()
+            case .bookmarks:
+                enqueueAllLocalBookmarks()
+            case .playlists:
+                enqueueAllLocalPlaylists()
+            case .searchHistory:
+                enqueueAllLocalSearchHistory()
+            case .recentChannels:
+                enqueueAllRecentChannels()
+            case .recentPlaylists:
+                enqueueAllRecentPlaylists()
+            case .channelNotificationSettings:
+                enqueueAllLocalChannelNotificationSettings()
+            case .controlsPresets:
+                await enqueueAllLocalControlsPresets()
+            }
+        }
+
+        return complete
+    }
+
     /// Performs full initial upload of all local data with progress tracking
     func performInitialUpload() async {
         guard isSyncEnabled else { return }
-        
+
         uploadProgress = UploadProgress(
             currentCategory: "Starting...",
             isComplete: false,
             totalOperations: 0
         )
-        
-        // Upload each category sequentially with progress updates
-        await uploadAllLocalSubscriptions()
-        await uploadAllLocalWatchHistory()
-        await uploadAllLocalBookmarks()
-        await uploadAllLocalPlaylists()
-        await uploadAllLocalSearchHistory()
-        await uploadAllRecentChannels()
-        await uploadAllRecentPlaylists()
-        await uploadAllLocalChannelNotificationSettings()
-        await uploadAllLocalControlsPresets()
-        
+
+        // Register every category first, then send once: nine sends in a row
+        // bought nothing but round trips, and the accounts went last, which is
+        // how an interrupted upload lost them.
+        await enqueueFullUpload()
+        await sync()
+
         // Mark complete
         uploadProgress = UploadProgress(
             currentCategory: "Complete",
@@ -1591,12 +1882,13 @@ final class CloudKitSyncEngine: @unchecked Sendable {
             syncError = CloudKitError.notAuthenticated
             
         case .zoneNotFound:
-            LoggingService.shared.logCloudKit("Zone not found, recreating...")
-            Task {
-                try? await zoneManager?.createZoneIfNeeded()
-                await sync()
-            }
-            
+            // Through the engine's state: this can be reached from inside a
+            // delegate callback (`sync()` is called from several), where asking
+            // the engine to sync is a trap, and where the zone manager's
+            // memo would refuse to recreate anything anyway.
+            LoggingService.shared.logCloudKit("Zone not found, asking the engine to recreate it")
+            requestZoneRecreation()
+
         case .partialFailure:
             LoggingService.shared.logCloudKitError("Partial sync failure", error: error)
             if let partialErrors = ckError.partialErrorsByItemID {
@@ -1622,9 +1914,14 @@ final class CloudKitSyncEngine: @unchecked Sendable {
     }
     
     private func scheduleRetry(delay: TimeInterval) {
-        Task {
+        // Detached, not a plain `Task`: an unstructured task copies the task
+        // locals of whatever created it, and this can be created from inside a
+        // sync-engine event callback — where CloudKit traps on a call back into
+        // the engine, and reads "inside the callback" from exactly those
+        // locals.
+        Task.detached { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            await sync()
+            await self?.sync()
         }
     }
 }
@@ -1633,6 +1930,39 @@ final class CloudKitSyncEngine: @unchecked Sendable {
 
 extension CloudKitSyncEngine: CKSyncEngineDelegate {
     nonisolated func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
+        if PerfCounter.enabled {
+            PerfCounter.count("cloudkit.event." + Self.performanceName(of: event))
+        }
+        // Marks the whole callback tree, so anything that re-enters the engine
+        // from inside it says so in a debug build instead of trapping on
+        // someone's device. Inherited by every plain `Task { }` started below
+        // it — which is precisely the mistake worth catching — and escaped by
+        // `Task.detached`, which is the fix.
+        await CloudKitDelegateScope.$isHandlingEvent.withValue(true) {
+            await handleDelegateEvent(event)
+        }
+    }
+
+    /// Event name for performance counters (the event's description includes its payload).
+    private nonisolated static func performanceName(of event: CKSyncEngine.Event) -> String {
+        switch event {
+        case .stateUpdate: "stateUpdate"
+        case .accountChange: "accountChange"
+        case .fetchedDatabaseChanges: "fetchedDatabaseChanges"
+        case .fetchedRecordZoneChanges: "fetchedRecordZoneChanges"
+        case .sentDatabaseChanges: "sentDatabaseChanges"
+        case .sentRecordZoneChanges: "sentRecordZoneChanges"
+        case .willFetchChanges: "willFetchChanges"
+        case .willFetchRecordZoneChanges: "willFetchRecordZoneChanges"
+        case .didFetchRecordZoneChanges: "didFetchRecordZoneChanges"
+        case .didFetchChanges: "didFetchChanges"
+        case .willSendChanges: "willSendChanges"
+        case .didSendChanges: "didSendChanges"
+        @unknown default: "other"
+        }
+    }
+
+    private nonisolated func handleDelegateEvent(_ event: CKSyncEngine.Event) async {
         // Events that require async processing must be awaited directly (not in a fire-and-forget Task)
         // so that CKSyncEngine waits for processing to complete before advancing the sync state token.
         // Otherwise the state is saved before changes are applied, and on next launch CKSyncEngine
@@ -1650,16 +1980,33 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
         case .fetchedDatabaseChanges(let changes):
             await handleFetchedDatabaseChanges(changes)
 
+        case .didFetchRecordZoneChanges(let changes):
+            // The zone's own result — not didFetchChanges, which carries only
+            // the fetch context and fires after failed zone fetches too — is
+            // what tells staged account records they may be applied.
+            await accountSync?.zoneFetchCompleted(zoneID: changes.zoneID, error: changes.error)
+
+        case .stateUpdate(let update):
+            // Numbered here, before the hop to the main actor: a recovery holds
+            // the main actor while it registers its work, so an update handed
+            // over before that can still run its body afterwards — carrying a
+            // serialization in which none of the work exists.
+            let delivery = stateUpdateDeliveries.next()
+            await MainActor.run {
+                let encoder = PropertyListEncoder()
+                let stateSize = (try? encoder.encode(update.stateSerialization))?.count ?? 0
+                LoggingService.shared.logCloudKit("Sync state updated and saved (\(stateSize) bytes)")
+                saveSyncState(update.stateSerialization)
+                // The state just written may be what a zone recovery registered
+                // itself into, so the note that it still owes that work can go
+                // — and not one moment earlier.
+                zoneRecovery.stateDidPersist(deliveredAt: delivery)
+                updatePendingCount()
+            }
+
         default:
             await MainActor.run {
                 switch event {
-                case .stateUpdate(let update):
-                    let encoder = PropertyListEncoder()
-                    let stateSize = (try? encoder.encode(update.stateSerialization))?.count ?? 0
-                    LoggingService.shared.logCloudKit("Sync state updated and saved (\(stateSize) bytes)")
-                    saveSyncState(update.stateSerialization)
-                    updatePendingCount()
-
                 case .accountChange:
                     LoggingService.shared.logCloudKit("iCloud account change event received - reinitializing sync engine")
                     Task.detached { [weak self] in
@@ -1669,12 +2016,15 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
                 case .willFetchChanges:
                     LoggingService.shared.logCloudKit("CKSyncEngine will fetch changes (auto-triggered)")
                     isReceivingChanges = true
+                    // Binds everything this fetch delivers to the identity it
+                    // started under; the Apple account can move mid-fetch.
+                    accountSync?.fetchDidBegin()
 
                 case .didFetchChanges:
                     LoggingService.shared.logCloudKit("CKSyncEngine finished fetching changes")
                     isReceivingChanges = false
 
-                case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges, .willSendChanges, .didSendChanges, .sentDatabaseChanges:
+                case .willFetchRecordZoneChanges, .willSendChanges, .didSendChanges, .sentDatabaseChanges:
                     break
 
                 default:
@@ -1709,7 +2059,17 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
 
         // A conflict-resolved record (carrying the server change tag) takes precedence
         if let resolved = conflictResolvedRecords[recordName] {
-            return resolved
+            if mayUseResolvedRecord(resolved) {
+                return resolved
+            }
+
+            // An account record built under another identity can never become
+            // valid here — including one resolved after the identity moved but
+            // before the accounts in memory caught up, which the invalidation on
+            // the change itself cannot have seen. Dropping it costs at most one
+            // more conflict round-trip; serving it would upload another Apple
+            // account's data.
+            conflictResolvedRecords.removeValue(forKey: recordName)
         }
 
         if let record = await materializeRecord(named: recordName) {
@@ -1721,43 +2081,102 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
         return nil
     }
 
+    /// Whether a conflict-resolved record may be cached for retry, and served
+    /// when that retry is sent.
+    ///
+    /// This cache is keyed by record name alone, and account record names are
+    /// deterministic across Apple accounts — so the name says nothing about
+    /// whose record this is, and the record's own stamp has to be asked. Both
+    /// ends need the question: the resolution runs asynchronously and can finish
+    /// after the identity moved (too late for the invalidation that change
+    /// triggers), and the send can come later still. Falling through to
+    /// materialization is safe — the coordinator holds the change there, and the
+    /// durable outbox re-registers it. Every other category is unaffected:
+    /// nothing else here is namespaced by Apple account.
+    private func mayUseResolvedRecord(_ record: CKRecord) -> Bool {
+        guard AccountRecordName.isAccountCategory(record.recordID.recordName) else { return true }
+        return accountSync?.belongsToCurrentIdentity(record) ?? false
+    }
+
+    /// Puts an account record's engine change back when a conflict is abandoned.
+    ///
+    /// The send consumed the pending change, and these paths return without
+    /// registering another — but the account outbox is durable and still owes
+    /// the record, and unlike the SwiftData categories nothing re-derives it
+    /// from a model change. It would sit there until an unrelated edit, an
+    /// identity reload or a relaunch happened to re-register it. The coordinator
+    /// decides what is actually still owed; a record that is not simply does
+    /// nothing here. Other categories keep the existing behaviour.
+    private func restoreAccountOutboxIfNeeded(for recordName: String) {
+        guard AccountRecordName.isAccountCategory(recordName) else { return }
+        accountSync?.enqueueDirtyRecords()
+    }
+
+    /// Drops the account records held from conflict resolution, for when the
+    /// identity moves. Called by the coordinator, which is what observes that.
+    private func discardConflictResolvedAccountRecords() {
+        let stale = conflictResolvedRecords.keys.filter { AccountRecordName.isAccountCategory($0) }
+        guard !stale.isEmpty else { return }
+
+        for recordName in stale {
+            conflictResolvedRecords.removeValue(forKey: recordName)
+        }
+
+        LoggingService.shared.logCloudKit(
+            "Discarded \(stale.count) conflict-resolved account records after the Apple account changed"
+        )
+    }
+
     // MARK: - Scope-Aware Local Lookups
 
     /// Bare-ID lookups can return an entity from a different source scope when
     /// IDs collide across sources; these helpers match on the mapper-derived
     /// record name so the right entity is merged, materialized, or deleted.
+    /// Entities whose ID corresponds to a bare ID parsed from a record name.
+    /// A verbatim bare ID is an indexed lookup; a digest (an ID too long to
+    /// embed in the record name) has to be matched against every entity.
+    private func candidates<Entity>(
+        for bareID: String,
+        exact: (String) -> [Entity],
+        all: () -> [Entity],
+        id: (Entity) -> String
+    ) -> [Entity] {
+        guard SyncableRecordType.isHashedBareID(bareID) else { return exact(bareID) }
+        return all().filter { SyncableRecordType.entityID(id($0), matchesBareID: bareID) }
+    }
+
     private func localSubscription(matching recordName: String, channelID: String, in dataManager: DataManager) -> Subscription? {
-        dataManager.subscriptions(forChannelID: channelID).first {
+        candidates(for: channelID, exact: dataManager.subscriptions(forChannelID:), all: dataManager.subscriptions, id: \.channelID).first {
             recordMapper.toCKRecord(subscription: $0).recordID.recordName == recordName
         }
     }
 
     private func localWatchEntry(matching recordName: String, videoID: String, in dataManager: DataManager) -> WatchEntry? {
-        dataManager.watchEntries(forVideoID: videoID).first {
+        candidates(for: videoID, exact: dataManager.watchEntries(forVideoID:), all: dataManager.allWatchEntries, id: \.videoID).first {
             recordMapper.toCKRecord(watchEntry: $0).recordID.recordName == recordName
         }
     }
 
     private func localBookmark(matching recordName: String, videoID: String, in dataManager: DataManager) -> Bookmark? {
-        dataManager.bookmarks(forVideoID: videoID).first {
+        candidates(for: videoID, exact: dataManager.bookmarks(forVideoID:), all: dataManager.allBookmarks, id: \.videoID).first {
             recordMapper.toCKRecord(bookmark: $0).recordID.recordName == recordName
         }
     }
 
     private func localRecentChannel(matching recordName: String, channelID: String, in dataManager: DataManager) -> RecentChannel? {
-        dataManager.recentChannelEntries(forChannelID: channelID).first {
+        candidates(for: channelID, exact: dataManager.recentChannelEntries(forChannelID:), all: dataManager.allRecentChannels, id: \.channelID).first {
             recordMapper.toCKRecord(recentChannel: $0).recordID.recordName == recordName
         }
     }
 
     private func localRecentPlaylist(matching recordName: String, playlistID: String, in dataManager: DataManager) -> RecentPlaylist? {
-        dataManager.recentPlaylistEntries(forPlaylistID: playlistID).first {
+        candidates(for: playlistID, exact: dataManager.recentPlaylistEntries(forPlaylistID:), all: dataManager.allRecentPlaylists, id: \.playlistID).first {
             recordMapper.toCKRecord(recentPlaylist: $0).recordID.recordName == recordName
         }
     }
 
     private func localChannelNotificationSettings(matching recordName: String, channelID: String, in dataManager: DataManager) -> ChannelNotificationSettings? {
-        dataManager.allChannelNotificationSettings(forChannelID: channelID).first {
+        candidates(for: channelID, exact: dataManager.allChannelNotificationSettings(forChannelID:), all: dataManager.allChannelNotificationSettings, id: \.channelID).first {
             recordMapper.toCKRecord(channelNotificationSettings: $0).recordID.recordName == recordName
         }
     }
@@ -1767,6 +2186,12 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
     /// matched on the full scoped record name (a mismatch means it belongs to
     /// a different source scope).
     private func materializeRecord(named recordName: String) async -> CKRecord? {
+        // Accounts are not SwiftData models and are built from the accounts
+        // store, which also decides whether a record may be sent yet.
+        if AccountRecordName.isAccountCategory(recordName) {
+            return accountSync?.recordToSave(named: recordName)
+        }
+
         guard let dataManager else { return nil }
 
         if recordName.hasPrefix("sub-") {
@@ -1849,6 +2274,10 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
             retryCount.removeValue(forKey: recordName)
         }
 
+        // Clears the account outbox and releases whatever its ordering held
+        // back. Only a confirmation does this — never the attempt.
+        accountSync?.didSave(records: changes.savedRecords)
+
         for failedSave in changes.failedRecordSaves {
             await handleFailedRecordSave(failedSave)
         }
@@ -1875,6 +2304,7 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
             guard let serverRecord = error.serverRecord else {
                 LoggingService.shared.logCloudKitError("No server record in conflict error for \(recordName)", error: error)
                 conflictResolvedRecords.removeValue(forKey: recordName)
+                restoreAccountOutboxIfNeeded(for: recordName)
                 return
             }
 
@@ -1886,6 +2316,7 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
                 )
                 conflictResolvedRecords.removeValue(forKey: recordName)
                 retryCount.removeValue(forKey: recordName)
+                restoreAccountOutboxIfNeeded(for: recordName)
                 return
             }
             retryCount[recordName] = attempts + 1
@@ -1894,6 +2325,20 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
             // The resolved record keeps the server change tag, so the retry
             // is accepted as an update.
             let resolved = await resolveConflict(local: record, server: serverRecord)
+
+            // The resolution suspends, and the Apple account can move across
+            // that suspension: this handler may have begun for an identity that
+            // is no longer the one this cache would serve the retry to. Neither
+            // the record nor its retry is this identity's to send.
+            guard mayUseResolvedRecord(resolved) else {
+                conflictResolvedRecords.removeValue(forKey: recordName)
+                retryCount.removeValue(forKey: recordName)
+                LoggingService.shared.logCloudKit(
+                    "Dropping the conflict resolution for \(recordName) — it was built under a different Apple account"
+                )
+                return
+            }
+
             conflictResolvedRecords[recordName] = resolved
             syncEngine?.state.add(pendingRecordZoneChanges: [.saveRecord(recordID)])
             LoggingService.shared.logCloudKit("Resolved \(serverRecord.recordType) conflict for \(recordName), retrying (attempt \(attempts + 1))")
@@ -1902,15 +2347,24 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
             // Record vanished server-side while we held its change tag —
             // drop the cached record and retry as a fresh insert.
             conflictResolvedRecords.removeValue(forKey: recordName)
+
+            // Unless a deletion tombstone dominates it. Reinserting an account
+            // another device deleted is exactly how a queued offline edit
+            // resurrects it.
+            if let accountSync, !accountSync.shouldRetryAsInsert(recordName: recordName) {
+                LoggingService.shared.logCloudKit("Record \(recordName) is deleted, not reinserting")
+                return
+            }
+
             syncEngine?.state.add(pendingRecordZoneChanges: [.saveRecord(recordID)])
             LoggingService.shared.logCloudKit("Record \(recordName) missing on server, retrying as insert")
 
         case .zoneNotFound:
-            // Zone was deleted — recreate it and retry the save
+            // Zone was deleted — recreate it and retry the save. The engine
+            // saves a pending zone ahead of the records that need it, and
+            // unlike the zone manager it has no memo saying it already did.
             syncEngine?.state.add(pendingRecordZoneChanges: [.saveRecord(recordID)])
-            Task {
-                try? await zoneManager?.createZoneIfNeeded()
-            }
+            requestZoneRecreation()
             LoggingService.shared.logCloudKit("Zone missing for \(recordName), recreating and retrying")
 
         case .zoneBusy, .serviceUnavailable, .requestRateLimited, .networkFailure, .networkUnavailable,
@@ -1966,6 +2420,12 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
             return await conflictResolver.resolveRecentPlaylistConflict(local: local, server: server)
         case RecordType.controlsPreset:
             return await conflictResolver.resolveLayoutPresetConflict(local: local, server: server)
+        case RecordType.channelNotificationSettings:
+            return await conflictResolver.resolveChannelNotificationSettingsConflict(local: local, server: server)
+        case RecordType.account, RecordType.dataContext,
+             RecordType.legacyAccountMigration, RecordType.accountDeletion:
+            guard let accountSync else { return server }
+            return await accountSync.resolveConflict(local: local, server: server)
         default:
             // Unknown type - use server version (safe fallback)
             LoggingService.shared.logCloudKit("Unknown record type \(server.recordType), using server version")
@@ -1974,34 +2434,170 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
     }
     
     /// Handle fetched database-level changes (zone creations/deletions).
-    /// Now that the engine resumes from persisted state, a remote deletion of our
-    /// zone (reset from another device, iCloud data purge, encrypted data reset)
-    /// would leave sync silently dead - recreate the zone and re-seed it from
-    /// local data.
+    ///
+    /// A remote deletion of our zone — a reset from another device, an iCloud
+    /// data purge, an encrypted-data reset — would otherwise leave sync
+    /// silently dead against a zone that holds nothing.
+    ///
+    /// Runs inside `handleEvent`, so it may only write to durable storage and
+    /// to the engine's state. It must never call `fetchChanges()` or
+    /// `sendChanges()`, directly or through anything it awaits: CloudKit traps
+    /// on re-entrant engine calls, in release builds, and the trap is what
+    /// killed the app on device A in the S14 campaign.
     private func handleFetchedDatabaseChanges(_ changes: CKSyncEngine.Event.FetchedDatabaseChanges) async {
         LoggingService.shared.logCloudKit("Fetched database changes")
 
-        guard changes.deletions.contains(where: { $0.zoneID.zoneName == RecordType.zoneName }) else {
+        guard let deletion = changes.deletions.first(where: { $0.zoneID.zoneName == RecordType.zoneName }) else {
             return
         }
 
-        LoggingService.shared.logCloudKit("Zone '\(RecordType.zoneName)' was deleted remotely - recreating and re-uploading local data")
-        UserDefaults.standard.removeObject(forKey: syncStateKey)
+        await answerZoneDeletion(ZoneDeletionResponse(reason: deletion.reason))
+    }
+
+    /// Answers a deletion of our zone, using nothing but durable storage and
+    /// the engine's own state.
+    ///
+    /// The two responses are not equally repeatable, and their markers are
+    /// retired on different terms because of it — see ``ZoneRecoveryRetirement``.
+    /// A re-seed only adds, so it is safe to run twice and is held open until
+    /// the engine has written it down. A purge removes, and running it a second
+    /// time would remove work registered in between, so it is retired the
+    /// moment its durable half succeeds.
+    private func answerZoneDeletion(_ response: ZoneDeletionResponse) async {
+        // Durable first. Everything below can be interrupted, and a relaunch
+        // that finds the zone recreated and no marker cannot tell a wiped zone
+        // from a healthy one — which is how the wipe became permanent on
+        // device A.
+        zoneRecovery.begin(response)
 
         // Cached conflict records hold change tags from the deleted zone
         conflictResolvedRecords.removeAll()
         retryCount.removeAll()
 
-        do {
-            try await zoneManager?.createZoneIfNeeded()
-            await performInitialUpload()
-        } catch {
-            LoggingService.shared.logCloudKitError("Failed to recreate zone after remote deletion", error: error)
+        switch response {
+        case .reseed:
+            LoggingService.shared.logCloudKit(
+                "Zone '\(RecordType.zoneName)' was deleted remotely - recreating it and re-registering local data"
+            )
+            // Through the engine, not the zone manager: the manager remembers
+            // having created the zone this session and would do nothing, and
+            // the engine saves the zone ahead of the records that need it.
+            requestZoneRecreation()
+            finish(response, ifComplete: await enqueueFullUpload())
+
+        case .discard:
+            LoggingService.shared.logCloudKit(
+                "Zone '\(RecordType.zoneName)' was purged by the account owner - dropping what it held, nothing is resent"
+            )
+            finish(response, ifComplete: discardWhatThePurgedZoneHeld())
         }
+    }
+
+    /// Retires the marker, or arms it to be retired, once the recovery reached
+    /// every category.
+    ///
+    /// The account half can refuse while the identity it belongs to has not
+    /// loaded, and a recovery that left the accounts out is one that has to be
+    /// answered again — by the retry that runs when the accounts arrive, or by
+    /// the next launch.
+    ///
+    /// When it did reach everything, *how* the marker goes depends on the
+    /// response: a re-seed waits for the engine to serialize the work it
+    /// registered, a purge is already done. See ``ZoneRecoveryRetirement``.
+    private func finish(_ response: ZoneDeletionResponse, ifComplete complete: Bool) {
+        guard complete else {
+            zoneRecoveryAwaitsAccounts = true
+            LoggingService.shared.logCloudKit(
+                "Zone recovery could not reach the account records yet - keeping the marker for the accounts to arrive"
+            )
+            return
+        }
+
+        zoneRecoveryAwaitsAccounts = false
+
+        switch response.retirement {
+        case .whenStatePersists:
+            zoneRecovery.readyToClear(afterDelivery: stateUpdateDeliveries.current)
+        case .immediately:
+            zoneRecovery.retireNow()
+        }
+    }
+
+    /// Re-registers the recovery a previous run recorded but may not have
+    /// finished.
+    ///
+    /// Called during setup, and again whenever the accounts this device could
+    /// not speak for become readable. Never from inside a delegate callback:
+    /// the recovery is safe there, but the retry's trigger is a notification
+    /// the delegate tree posts, and the hop out of it is what keeps that true.
+    private func resumeZoneRecoveryIfNeeded() async {
+        guard let response = zoneRecovery.pending else { return }
+
+        LoggingService.shared.logCloudKit(
+            "A zone deletion from an earlier run was not fully answered (\(response.rawValue)) - answering it now"
+        )
+        await answerZoneDeletion(response)
+    }
+
+    /// Asks the engine to recreate the zone as part of its next send.
+    private func requestZoneRecreation() {
+        guard let syncEngine else { return }
+        syncEngine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
+    }
+
+    /// Drops everything this device still owed the zone, and everything it had
+    /// cached from it.
+    ///
+    /// For the purge reasons only. CloudKit is explicit that data deleted that
+    /// way must not be sent back, and a pending change is precisely a record
+    /// waiting to be sent. Local data itself is untouched: it is this app's own
+    /// store, and the purge was about the copy in iCloud.
+    /// - Returns: whether the account category could be cleared too. It cannot
+    ///   while the accounts in memory belong to another identity, and a purge
+    ///   half-answered has to be answered again.
+    private func discardWhatThePurgedZoneHeld() -> Bool {
+        if let syncEngine {
+            let pending = syncEngine.state.pendingRecordZoneChanges
+            if !pending.isEmpty {
+                syncEngine.state.remove(pendingRecordZoneChanges: pending)
+            }
+
+            // A pending `.saveZone` would put the purged zone back on the next
+            // send — from an earlier `.zoneNotFound`, or from a re-seed this
+            // purge overtook. The zone comes back lazily when the user next
+            // changes something, which is a new decision rather than a resend.
+            let pendingZones = syncEngine.state.pendingDatabaseChanges
+            if !pendingZones.isEmpty {
+                syncEngine.state.remove(pendingDatabaseChanges: pendingZones)
+            }
+        }
+        pendingChangesBuffer.removeAll()
+        clearDeferredItems()
+
+        // Written by a build older than the state-driven engine and consumed by
+        // `migrateLegacyPendingChanges(into:)`. A resumed purge runs after that
+        // migration, so these are normally already spent — but a purge answered
+        // before the migration ever ran would otherwise leave them to be
+        // rediscovered and sent on a later launch.
+        UserDefaults.standard.removeObject(forKey: pendingSaveRecordNamesKey)
+        UserDefaults.standard.removeObject(forKey: pendingDeleteRecordNamesKey)
+
+        let accountsCleared = accountSync?.discardWhatTheZoneHeld() ?? true
+        updatePendingCount()
+        return accountsCleared
     }
 
     /// Handle fetched changes from CloudKit.
     private func handleFetchedChanges(_ changes: CKSyncEngine.Event.FetchedRecordZoneChanges) async {
+        // Staged first, and before any early return: the engine may persist its
+        // change token after this event, so anything not written down here is
+        // gone for good. Account records are never applied inline — they are
+        // applied as a set, tombstones first, once the zone fetch succeeds.
+        accountSync?.stageFetched(
+            records: changes.modifications.map(\.record),
+            deletions: changes.deletions.map(\.recordID)
+        )
+
         guard let dataManager else { return }
 
         // Load persisted deferred items from previous sessions
@@ -2012,6 +2608,7 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
 
         // Apply modifications - process all incoming records
         for modification in changes.modifications {
+            guard !RecordType.accountCategory.contains(modification.record.recordType) else { continue }
             let result = await applyRemoteRecord(modification.record, to: dataManager)
             if case .deferred(let playlistID, let itemID) = result {
                 newlyDeferredItems.append((modification.record, playlistID, itemID))
@@ -2047,6 +2644,7 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
 
         // Apply deletions
         for deletion in changes.deletions {
+            guard !AccountRecordName.isAccountCategory(deletion.recordID.recordName) else { continue }
             await applyRemoteDeletion(deletion.recordID, to: dataManager)
         }
 
@@ -2118,7 +2716,8 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
                 } else {
                     // New subscription from iCloud
                     dataManager.insertSubscription(subscription)
-                    
+                    SubscriptionFeedCache.shared.invalidate()
+
                     // Post notification to update UI
                     let change = SubscriptionChange(addedSubscriptions: [subscription], removedChannelIDs: [])
                     NotificationCenter.default.post(
@@ -2550,6 +3149,7 @@ extension CloudKitSyncEngine: CKSyncEngineDelegate {
             if let subscription = localSubscription(matching: recordName, channelID: channelID, in: dataManager) {
                 dataManager.deleteSubscription(subscription)
                 dataManager.save()
+                SubscriptionFeedCache.shared.invalidate()
                 let change = SubscriptionChange(addedSubscriptions: [], removedChannelIDs: [channelID])
                 NotificationCenter.default.post(
                     name: .subscriptionsDidChange,
@@ -2674,6 +3274,7 @@ enum SyncStatus: Equatable {
 enum CloudKitError: Error, LocalizedError, Sendable {
     case iCloudNotAvailable(status: CKAccountStatus)
     case notAuthenticated
+    case syncDisabled
     case quotaExceeded
     case zoneNotFound
     case recordNotFound
@@ -2690,6 +3291,8 @@ enum CloudKitError: Error, LocalizedError, Sendable {
             "iCloud is not available (status: \(status))"
         case .notAuthenticated:
             "Not signed into iCloud. Sign in to Settings to enable sync."
+        case .syncDisabled:
+            "iCloud sync is turned off. Turn it on before resetting iCloud data."
         case .quotaExceeded:
             "iCloud storage quota exceeded. Free up space in iCloud settings."
         case .zoneNotFound:

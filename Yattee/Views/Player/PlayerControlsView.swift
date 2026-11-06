@@ -43,9 +43,8 @@ struct PlayerControlsView: View {
     var isPanelVisible: Bool = true
     var panelSide: FloatingPanelSide = .right
     var isPanelPinned: Bool = false
-    /// Safe area padding from layout (when panel is pinned)
-    var layoutLeadingSafeArea: CGFloat = 0
-    var layoutTrailingSafeArea: CGFloat = 0
+    /// Corner layout: fullscreen button toggles the panels
+    var isCornerLayout: Bool = false
     var onToggleOrientationLock: (() -> Void)? = nil
     var isOrientationLocked: Bool = false
     var onToggleDetailsVisibility: (() -> Void)? = nil
@@ -65,6 +64,13 @@ struct PlayerControlsView: View {
     var videoAreaHeight: CGFloat? = nil
     /// Video fit height for slider sizing (stable during drag, unlike videoAreaHeight)
     var videoFitHeight: CGFloat? = nil
+    /// Pushes the top bar down from the screen top (tabletop layout on a
+    /// foldable: every control lives on the lower half)
+    var topBarOffset: CGFloat = 0
+    /// Horizontal safe area of the hosting view (leading, trailing) for the
+    /// portrait fullscreen layout, which spans the full window width. Passed
+    /// in because the controls layer itself ignores the safe area.
+    var horizontalSafeArea: (leading: CGFloat, trailing: CGFloat) = (0, 0)
 
     /// Callback when volume changes (value 0.0-1.0)
     var onVolumeChanged: ((Float) -> Void)? = nil
@@ -111,7 +117,6 @@ struct PlayerControlsView: View {
 
     // MARK: - Sheet State
 
-    @State private var showingPlaylistSheet = false
     @State private var showingCaptionsSheet = false
     @State private var showingVideoTrackSheet = false
     @State private var showingAudioTrackSheet = false
@@ -132,15 +137,23 @@ struct PlayerControlsView: View {
     @State private var targetSeekProgress: Double = 0
     @State private var hideTimer: Timer?
     @State private var showControls: Bool?
-    @State private var isAdjustingVolume = false
-    @State private var isAdjustingBrightness = false
-    /// Tracks brightness value for side slider (needed because UIScreen.main.brightness isn't observable)
-    @State private var currentBrightness: Double = UIScreen.main.brightness
-    @State private var playNextTapCount = 0
+    /// Tracks brightness value for side slider (needed because UIScreen.brightness isn't observable)
+    @State private var currentBrightness: Double = PlayerBrightness.value(for: nil)
     /// Track safe area to force re-render when it changes
     @State private var currentSafeArea: UIEdgeInsets = .zero
+    /// Window hosting these controls, captured by `HostWindowReader`. Safe
+    /// area must come from here: a global scene lookup can land on another
+    /// display's window (iPhone Duo exterior with its 84pt status bar inset
+    /// while the player sits on the interior in Split View).
+    @State private var hostWindow: UIWindow?
+    private var hostScreen: UIScreen? { hostWindow?.windowScene?.screen }
+    @Environment(\.statusBarVisibilityController) private var statusBarController
     /// Active player controls layout from preset (passed from parent to avoid flashing during view recreation)
     var activeLayout: PlayerControlsLayout = .default
+    /// Moves the buttons off the leading part of the controls frame while the
+    /// dimming background and tap handling keep covering all of it (foldable
+    /// book posture: buttons on the half right of the hinge).
+    var buttonsLeadingInset: CGFloat = 0
     /// Animation trigger for seek backward button
     @State private var seekBackwardTrigger = false
     /// Animation trigger for seek forward button
@@ -185,6 +198,7 @@ struct PlayerControlsView: View {
     }
 
     var body: some View {
+        let _ = PerfCounter.body("PlayerControlsView")
         GeometryReader { geometry in
 
             ZStack {
@@ -230,6 +244,14 @@ struct PlayerControlsView: View {
                 cancelHideTimer()
             }
         }
+        .onChange(of: isPanelVisible) { oldValue, newValue in
+            // Corner layout: any panel toggle resizes the controls area —
+            // keep the controls hidden while that transition plays
+            if isCornerLayout, oldValue != newValue {
+                showControls = false
+                cancelHideTimer()
+            }
+        }
         .onChange(of: playerState.retryState.exhausted) { _, exhausted in
             // Hide controls when retries are exhausted (retry exhausted overlay takes over)
             if exhausted {
@@ -248,6 +270,12 @@ struct PlayerControlsView: View {
             // Sync local controls visibility to playerState for other views to observe
             playerState.controlsVisible = newValue ?? (playerState.playbackState == .paused)
         }
+        .background(HostWindowReader { window in
+            guard window !== hostWindow else { return }
+            hostWindow = window
+            currentSafeArea = windowSafeArea
+            currentBrightness = PlayerBrightness.value(for: hostScreen)
+        })
         .onAppear {
             // Update safe area on appear to ensure correct layout
             currentSafeArea = windowSafeArea
@@ -258,17 +286,24 @@ struct PlayerControlsView: View {
             // Update safe area when geometry changes (rotation)
             currentSafeArea = windowSafeArea
         }
+        .onChange(of: statusBarController?.isHidden) { _, _ in
+            // The window safe area follows the status bar fade with a delay.
+            // Corner layout keeps its geometry fixed across the toggle, so
+            // no geometry change refreshes the value — poll a few times
+            // instead of keeping a stale status bar height as top padding.
+            currentSafeArea = windowSafeArea
+            for delay in [0.15, 0.4, 0.8] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    currentSafeArea = windowSafeArea
+                }
+            }
+        }
         .onChange(of: activeLayout.effectiveGesturesSettings.panscanGesture.snapToEnds, initial: true) { _, newValue in
             // Sync panscan snap setting to navigation coordinator (initial: true ensures sync on first render)
             appEnvironment?.navigationCoordinator.shouldSnapPanscan = newValue
         }
         .onReceive(NotificationCenter.default.publisher(for: UIScreen.brightnessDidChangeNotification)) { _ in
-            currentBrightness = UIScreen.main.brightness
-        }
-        .sheet(isPresented: $showingPlaylistSheet) {
-            if let video = currentVideo {
-                PlaylistSelectorSheet(video: video)
-            }
+            currentBrightness = PlayerBrightness.value(for: hostScreen)
         }
         .sheet(isPresented: $showingCaptionsSheet) {
             captionsSheet
@@ -364,13 +399,17 @@ struct PlayerControlsView: View {
         UIDevice.current.userInterfaceIdiom == .pad
     }
 
-    /// Get safe area from window (works even when view ignores safe area)
+    /// Get safe area from the hosting window (works even when view ignores
+    /// safe area). Falls back to the active scene's key window until the
+    /// host window is known.
     private var windowSafeArea: UIEdgeInsets {
-        UIApplication.shared.connectedScenes
+        if let hostWindow {
+            return hostWindow.safeAreaInsets
+        }
+        return UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
-            .first?
-            .windows
-            .first?
+            .first(where: { $0.activationState == .foregroundActive })?
+            .keyWindow?
             .safeAreaInsets ?? .zero
     }
 
@@ -389,8 +428,11 @@ struct PlayerControlsView: View {
             isOrientationLocked: isOrientationLocked,
             isPanelVisible: isPanelVisible,
             isPanelPinned: isPanelPinned,
+            isCornerLayout: isCornerLayout,
             panelSide: panelSide,
             isIPad: isIPad,
+            canRotate: OrientationManager.shared.canRotateProgrammatically,
+            screen: hostWindow?.windowScene?.screen,
             showVolumeControls: showVolumeControls,
             showDebugButton: onToggleDebug != nil,
             showCloseButton: onClose != nil,
@@ -400,9 +442,7 @@ struct PlayerControlsView: View {
             availableStreams: availableStreams,
             currentStream: currentStream,
             currentAudioStream: currentAudioStream,
-            embeddedAudioTracks: embeddedAudioTracks,
             embeddedSubtitleTracks: embeddedSubtitleTracks,
-            currentEmbeddedAudioTrackID: currentEmbeddedAudioTrackID,
             currentEmbeddedSubtitleTrackID: currentEmbeddedSubtitleTrackID,
             panscanValue: panscanValue,
             isPanscanAllowed: isPanscanAllowed,
@@ -415,6 +455,10 @@ struct PlayerControlsView: View {
             onTogglePiP: onTogglePiP,
             onToggleFullscreen: onToggleFullscreen,
             onToggleDetailsVisibility: onToggleDetailsVisibility,
+            onHideControls: { [self] in
+                showControls = false
+                cancelHideTimer()
+            },
             onToggleOrientationLock: onToggleOrientationLock,
             onTogglePanel: onTogglePanel,
             onTogglePanscan: onTogglePanscan,
@@ -441,7 +485,12 @@ struct PlayerControlsView: View {
             },
             onRateChanged: onRateChanged,
             onCaptionSelected: onCaptionSelected,
-            onShowPlaylistSelector: { [self] in showingPlaylistSheet = true },
+            onShowPlaylistSelector: { [self] in
+                // Through the player's sheet host, which takes requests while the player is up
+                if let video = currentVideo {
+                    appEnvironment?.navigationCoordinator.presenter.present(.addToPlaylist(video))
+                }
+            },
             onShowQueue: onShowQueue,
             onShowCaptionsSelector: { [self] in showingCaptionsSheet = true },
             onShowChaptersSelector: { [self] in showingChaptersSheet = true },
@@ -455,8 +504,12 @@ struct PlayerControlsView: View {
 
     private var controlsOverlay: some View {
         ZStack {
-            // Background fill - extends into safe areas (except during dismiss gesture)
-            if isDismissGestureActive {
+            // Background fill - extends into safe areas (except during dismiss gesture).
+            // Tabletop (`topBarOffset` > 0) keeps every control off the video,
+            // so the video needs no dimming for readability.
+            if topBarOffset > 0 {
+                EmptyView()
+            } else if isDismissGestureActive {
                 Color.black.opacity(0.5)
                     .allowsHitTesting(false)
             } else {
@@ -467,6 +520,7 @@ struct PlayerControlsView: View {
 
             // Controls layout - explicitly fill parent bounds
             controlsVStack
+                .padding(.leading, buttonsLeadingInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -476,15 +530,21 @@ struct PlayerControlsView: View {
         let safeArea = currentSafeArea
         let basePadding: CGFloat = 12
 
-        // Vertical padding - always apply in widescreen (layout ignores safe area)
-        let topPadding: CGFloat = 2 + (isWideScreenLayout ? safeArea.top + 8 : 0)
+        // Vertical padding - always apply in widescreen (layout ignores safe area).
+        // Tabletop moves the top bar below the hinge (`topBarOffset`), away
+        // from the status bar, so the top safe area must not be added there.
+        let topPadding: CGFloat = 2 + (isWideScreenLayout && topBarOffset == 0 ? safeArea.top + 8 : 0)
 
         // Bottom padding - add safe area when controls are at screen bottom in fullscreen modes
         // When floating panel is visible (isPanelVisible && !isPanelPinned),
         // bottomExtraPadding handles positioning, so no safe area needed
         // In landscape (widescreen), cap the safe area since home indicator needs less clearance
         let floatingPanelActive = isPanelVisible && !isPanelPinned
-        let needsBottomSafeArea = (isWideScreenLayout || isFullscreen) && !floatingPanelActive
+        // Corner layout with panels visible: the controls frame ends at the
+        // video area mid-screen, so the window's bottom safe area (incl. the
+        // PiP inset) must not push the bottom bar up from the video edge
+        let cornerPanelsActive = isCornerLayout && isPanelVisible
+        let needsBottomSafeArea = (isWideScreenLayout || isFullscreen) && !floatingPanelActive && !cornerPanelsActive
         let bottomSafeArea = isWideScreenLayout ? min(safeArea.bottom, 12) : safeArea.bottom
         let bottomPadding: CGFloat = 2 + (needsBottomSafeArea ? bottomSafeArea : 0)
 
@@ -504,6 +564,13 @@ struct PlayerControlsView: View {
                 // Just use base padding for aesthetics
                 leftPadding = basePadding
                 rightPadding = basePadding
+            } else if horizontalSafeArea.leading > 0 || horizontalSafeArea.trailing > 0 {
+                // Portrait fullscreen (routed through the widescreen branch)
+                // spans the full window width: keep the controls out of the
+                // actual, asymmetric horizontal safe area (vertical status
+                // bar on the iPhone Duo exterior display)
+                leftPadding = basePadding + horizontalSafeArea.leading
+                rightPadding = basePadding + horizontalSafeArea.trailing
             } else {
                 // Panel not visible or not pinned - controls handle all safe areas (symmetric with max)
                 let safeAreaPadding = max(safeArea.left, safeArea.right) + 4
@@ -543,13 +610,42 @@ struct PlayerControlsView: View {
             // Extra padding at bottom to account for space below video area
             let bottomExtraPadding = geometry.size.height - effectiveVideoBottom
 
+            // A top safe area that only comes from a corner cutout (iPhone
+            // Duo exterior in landscape: camera and status items in one top
+            // corner) would drop the whole top bar; keep it at the edge and
+            // clear the cutout sideways instead
+            let barTopPadding = isWideScreenLayout && topBarOffset == 0
+                && isTopSafeAreaCornerOnly(in: geometry, safeAreaTop: safeArea.top)
+                ? topPadding - safeArea.top
+                : topPadding
+            let topBarTop = barTopPadding + topBarOffset
+
+            // Keep the bars' ends clear of a camera cutout in a screen corner
+            // (iPhone Duo exterior display in landscape)
+            let topCutout = cutoutClearance(
+                in: geometry,
+                band: topBarTop...(topBarTop + Self.cutoutBarBandHeight),
+                leadingPadding: leftPadding,
+                trailingPadding: rightPadding
+            )
+            let bottomBarBottom = geometry.size.height - bottomPadding
+                - (isPanelVisible && !isPanelPinned ? bottomExtraPadding : 0)
+            let bottomCutout = cutoutClearance(
+                in: geometry,
+                band: (bottomBarBottom - Self.cutoutBarBandHeight)...bottomBarBottom,
+                leadingPadding: leftPadding,
+                trailingPadding: rightPadding
+            )
+
             ZStack {
                 // Top bar - aligned to screen top (stays fixed regardless of video area)
                 VStack {
                     topBar
-                        .padding(.top, topPadding)
+                        .padding(.top, barTopPadding + topBarOffset)
+                        // The leading top corner is cleared by the corner
+                        // adaptation offset below
                         .padding(.leading, leftPadding)
-                        .padding(.trailing, rightPadding)
+                        .padding(.trailing, rightPadding + topCutout.trailing)
                         .applyCornerAdaptationOffset()
                         .overlay {
                             if showPlayerAreaDebug {
@@ -583,7 +679,10 @@ struct PlayerControlsView: View {
                     // Calculate available height for sliders
                     // Use full video area height for sliders (extends into letterbox areas)
                     let sliderBasisHeight = min(effectiveVideoHeight, geometry.size.height)
-                    let baseSliderAreaHeight = sliderBasisHeight - 48 - 100
+                    // Tabletop: the "video area" is the lower half already
+                    // trimmed of the top and bottom bars, so only the icon row
+                    // and a small margin are reserved
+                    let baseSliderAreaHeight = sliderBasisHeight - 48 - (topBarOffset > 0 ? 24 : 100)
                     // When videoFitHeight provided (panel/drag): use stable sizing within video
                     // When nil (fullscreen): target 250pt sliders when there's extra space
                     let isFullscreenWithSpace = videoFitHeight == nil && geometry.size.height > sliderBasisHeight * 1.5
@@ -630,8 +729,8 @@ struct PlayerControlsView: View {
                         // Only apply bottomExtraPadding when floating panel is visible (to stay above panel)
                         // When panel is pinned (side panel), bottom bar stays at screen bottom
                         .padding(.bottom, bottomPadding + (isPanelVisible && !isPanelPinned ? bottomExtraPadding : 0))
-                        .padding(.leading, leftPadding)
-                        .padding(.trailing, rightPadding)
+                        .padding(.leading, leftPadding + bottomCutout.leading)
+                        .padding(.trailing, rightPadding + bottomCutout.trailing)
                         .overlay {
                             if showPlayerAreaDebug {
                                 Rectangle().stroke(Color.blue, lineWidth: 1)
@@ -651,6 +750,7 @@ struct PlayerControlsView: View {
                         Text(verbatim: "vidTop: \(Int(effectiveVideoTop)) vidH: \(Int(effectiveVideoHeight))")
                         Text(verbatim: "centerOff: \(Int(centerYOffset)) btmExtra: \(Int(bottomExtraPadding))")
                         Text(verbatim: "vis: \(isPanelVisible ? "Y" : "N") fitH: \(Int(videoFitHeight ?? -1)) effVH: \(Int(effectiveVideoHeight))")
+                        Text(verbatim: "cutout top L:\(Int(topCutout.leading)) R:\(Int(topCutout.trailing)) btm L:\(Int(bottomCutout.leading)) R:\(Int(bottomCutout.trailing))")
                     }
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.cyan)
@@ -661,6 +761,56 @@ struct PlayerControlsView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
+    }
+
+    /// Height of the strip along the top and bottom edges where a bar's
+    /// buttons and progress bar sit, for matching against cutouts.
+    private static let cutoutBarBandHeight: CGFloat = 80
+    /// Space between a cutout and the nearest end of a bar.
+    private static let cutoutBarGap: CGFloat = 8
+
+    /// Whether everything occluding the top safe area sits in one top corner,
+    /// so the rest of the top edge is free. False without occlusion regions
+    /// (a plain status bar keeps its safe area).
+    private func isTopSafeAreaCornerOnly(in geometry: GeometryProxy, safeAreaTop: CGFloat) -> Bool {
+        guard #available(iOS 27.1, *), safeAreaTop > 0 else { return false }
+
+        let width = geometry.size.width
+        let topRegions = geometry.reservedRegions(kind: .occlusion)
+            .map(\.frame)
+            .filter { $0.minY < safeAreaTop && $0.maxX > 0 && $0.minX < width }
+        guard !topRegions.isEmpty else { return false }
+        return topRegions.allSatisfy { $0.maxX < width / 2 }
+            || topRegions.allSatisfy { $0.minX > width / 2 }
+    }
+
+    /// Extra leading/trailing padding that keeps a bar clear of occluding
+    /// hardware reaching into its `band` (the iPhone Duo exterior camera
+    /// sits in a screen corner in landscape, outside the safe area). Regions
+    /// spanning the middle, like a Dynamic Island in portrait, are left to
+    /// the safe area.
+    private func cutoutClearance(
+        in geometry: GeometryProxy,
+        band: ClosedRange<CGFloat>,
+        leadingPadding: CGFloat,
+        trailingPadding: CGFloat
+    ) -> (leading: CGFloat, trailing: CGFloat) {
+        guard #available(iOS 27.1, *) else { return (0, 0) }
+
+        let width = geometry.size.width
+        var leading: CGFloat = 0
+        var trailing: CGFloat = 0
+        for region in geometry.reservedRegions(kind: .occlusion) {
+            let frame = region.frame
+            guard frame.maxY > band.lowerBound, frame.minY < band.upperBound,
+                  frame.maxX > 0, frame.minX < width else { continue }
+            if frame.maxX < width / 2 {
+                leading = max(leading, frame.maxX + Self.cutoutBarGap - leadingPadding)
+            } else if frame.minX > width / 2 {
+                trailing = max(trailing, width - frame.minX + Self.cutoutBarGap - trailingPadding)
+            }
+        }
+        return (leading, trailing)
     }
 
     // MARK: - Top Bar
@@ -869,6 +1019,7 @@ struct PlayerControlsView: View {
 
     private var progressBar: some View {
         GeometryReader { geometry in
+            let _ = PerfCounter.body("PlayerControlsView.progressBar")
             ZStack(alignment: .bottomLeading) {
                 if playerState.isLive {
                     // For live streams, show simple red indicator (no scrubbing)
@@ -877,12 +1028,16 @@ struct PlayerControlsView: View {
                         .frame(height: 4)
                         .clipShape(Capsule())
                 } else {
-                    // Regular VOD progress bar with chapter segments
+                    // Regular VOD progress bar with chapter segments.
+                    // While the controls are hidden, read the times untracked so
+                    // the invisible bar isn't re-rendered on every time update.
+                    let isVisible = shouldShowControls
                     SegmentedProgressBar(
                         chapters: activeLayout.progressBarSettings.showChapters ? playerState.chapters : [],
                         duration: playerState.duration,
-                        currentTime: (isDragging || isPendingSeek) ? dragProgress * playerState.duration : playerState.currentTime,
-                        bufferedTime: playerState.bufferedTime,
+                        currentTime: (isDragging || isPendingSeek) ? dragProgress * playerState.duration
+                            : isVisible ? playerState.currentTime : playerState.untrackedCurrentTime,
+                        bufferedTime: isVisible ? playerState.bufferedTime : playerState.untrackedBufferedTime,
                         height: 4,
                         gapWidth: 2,
                         playedColor: activeLayout.progressBarSettings.playedColor.color,
@@ -950,7 +1105,8 @@ struct PlayerControlsView: View {
                         }
                 }
             }
-            .onChange(of: playerState.progress) { _, newProgress in
+            // Only observed while a seek is pending (progress changes every time update).
+            .onChange(of: isPendingSeek ? playerState.progress : -1) { _, newProgress in
                 // Clear isPendingSeek when playerState.progress converges to target (within 2%)
                 if isPendingSeek && abs(newProgress - targetSeekProgress) < 0.02 {
                     isPendingSeek = false
@@ -975,8 +1131,7 @@ struct PlayerControlsView: View {
                 storyboard: storyboard,
                 seekTime: seekTime,
                 storyboardService: StoryboardService.shared,
-                buttonBackground: activeLayout.globalSettings.buttonBackground,
-                theme: activeLayout.globalSettings.theme
+                buttonBackground: activeLayout.globalSettings.buttonBackground
             )
             .position(x: xPosition, y: yPosition)
             .transition(.opacity.combined(with: .scale(scale: 0.9)))
@@ -1111,6 +1266,9 @@ struct PlayerControlsView: View {
                 },
                 isPanelDragging: { [weak appEnvironment] in
                     appEnvironment?.navigationCoordinator.isPanelDragging ?? false
+                },
+                trailingEdgeRevealInset: { [weak appEnvironment] in
+                    appEnvironment?.navigationCoordinator.cornerSideColumnEdgeRevealInset ?? 0
                 }
             )
         }
@@ -1140,10 +1298,8 @@ struct PlayerControlsView: View {
                     GestureSeekPreviewView(
                         storyboard: playerState.preferredStoryboard,
                         seekTime: seekGesturePreviewTime,
-                        duration: playerState.duration,
                         storyboardService: StoryboardService.shared,
                         buttonBackground: activeLayout.globalSettings.buttonBackground,
-                        theme: activeLayout.globalSettings.theme,
                         chapters: playerState.chapters,
                         isActive: isSeekGestureActive,
                         availableWidth: gestureGeometry.size.width
@@ -1382,6 +1538,21 @@ struct PlayerControlsView: View {
             .modifier(SideSliderBackgroundModifier(buttonBackground: buttonBackground, theme: theme))
             .opacity(playerState.isControlsLocked ? 0.5 : 1.0)
             .allowsHitTesting(!playerState.isControlsLocked)
+            // Publish the slider frame (with slop) so the window-level dismiss
+            // pan never begins from a slider drag
+            .background {
+                GeometryReader { proxy in
+                    let isActive = shouldShowControls && !playerState.isControlsLocked
+                    let frame = isActive ? proxy.frame(in: .global).insetBy(dx: -12, dy: -12) : .zero
+                    Color.clear
+                        .onChange(of: frame, initial: true) { _, frame in
+                            appEnvironment?.navigationCoordinator.playerSideSliderFrames[isLeading] = frame
+                        }
+                        .onDisappear {
+                            appEnvironment?.navigationCoordinator.playerSideSliderFrames[isLeading] = nil
+                        }
+                }
+            }
         }
     }
 
@@ -1424,7 +1595,7 @@ struct PlayerControlsView: View {
     /// Always goes to the next higher preset from current position, wrapping from 100 to 0.
     private func cycleBrightnessPreset() {
         let presets: [Double] = [0.0, 0.25, 0.5, 0.75, 1.0]
-        let current = UIScreen.main.brightness
+        let current = PlayerBrightness.value(for: hostScreen)
 
         // Find next higher preset (with small tolerance for floating point)
         let newValue: Double
@@ -1435,7 +1606,7 @@ struct PlayerControlsView: View {
             newValue = 0.0
         }
 
-        UIScreen.main.brightness = newValue
+        PlayerBrightness.set(newValue, for: hostScreen)
         currentBrightness = newValue
     }
 
@@ -1471,7 +1642,7 @@ struct PlayerControlsView: View {
                 value: Binding(
                     get: { currentBrightness },
                     set: { newValue in
-                        UIScreen.main.brightness = newValue
+                        PlayerBrightness.set(newValue, for: hostScreen)
                         currentBrightness = newValue
                     }
                 ),
@@ -1617,6 +1788,34 @@ private struct SideSliderBackgroundModifier: ViewModifier {
         Color.black
         VerticalSlider(value: $value, range: 0...100)
             .border(Color.red, width: 3)
+    }
+}
+
+/// Reports the `UIWindow` hosting the view, on every window move.
+private struct HostWindowReader: UIViewRepresentable {
+    let onWindow: (UIWindow?) -> Void
+
+    func makeUIView(context: Context) -> WindowObservingView {
+        let view = WindowObservingView()
+        view.isUserInteractionEnabled = false
+        view.onWindow = onWindow
+        return view
+    }
+
+    func updateUIView(_ uiView: WindowObservingView, context: Context) {
+        uiView.onWindow = onWindow
+    }
+
+    final class WindowObservingView: UIView {
+        var onWindow: ((UIWindow?) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            let window = self.window
+            DispatchQueue.main.async { [weak self] in
+                self?.onWindow?(window)
+            }
+        }
     }
 }
 

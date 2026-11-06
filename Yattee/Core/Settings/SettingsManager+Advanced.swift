@@ -234,19 +234,6 @@ extension SettingsManager {
 
     // MARK: - Details Panel Settings
 
-    /// Which side the floating details panel appears on in landscape layout.
-    /// Default is right side.
-    var floatingDetailsPanelSide: FloatingPanelSide {
-        get {
-            if let cached = _floatingDetailsPanelSide { return cached }
-            return FloatingPanelSide(rawValue: string(for: .floatingDetailsPanelSide) ?? "") ?? .left
-        }
-        set {
-            _floatingDetailsPanelSide = newValue
-            set(newValue.rawValue, for: .floatingDetailsPanelSide)
-        }
-    }
-
     /// Default panel width in wide layout.
     static let defaultFloatingDetailsPanelWidth: CGFloat = 400
 
@@ -277,12 +264,75 @@ extension SettingsManager {
         }
     }
 
-    /// Whether the details panel is pinned in landscape layout.
-    /// Default is false (floating mode).
+    /// Last user-set portrait panel visibility, restored when the active
+    /// preset's portrait default visibility is "remember". Falls back to the
+    /// legacy shared value from before the per-orientation split.
+    var portraitDetailsPanelLastVisible: Bool {
+        get {
+            if let cached = _portraitDetailsPanelLastVisible { return cached }
+            return bool(for: .portraitDetailsPanelLastVisible, default: legacyDetailsPanelLastVisible)
+        }
+        set {
+            _portraitDetailsPanelLastVisible = newValue
+            set(newValue, for: .portraitDetailsPanelLastVisible)
+        }
+    }
+
+    /// Last user-set landscape panel visibility, restored when the active
+    /// preset's landscape default visibility is "remember". Falls back to the
+    /// legacy shared value from before the per-orientation split.
+    var landscapeDetailsPanelLastVisible: Bool {
+        get {
+            if let cached = _landscapeDetailsPanelLastVisible { return cached }
+            return bool(for: .landscapeDetailsPanelLastVisible, default: legacyDetailsPanelLastVisible)
+        }
+        set {
+            _landscapeDetailsPanelLastVisible = newValue
+            set(newValue, for: .landscapeDetailsPanelLastVisible)
+        }
+    }
+
+    /// The pre-split shared "remember" value; only read as the fallback for
+    /// the per-orientation values above.
+    private var legacyDetailsPanelLastVisible: Bool {
+        bool(for: .detailsPanelLastVisible, default: false)
+    }
+
+    /// Last user-set visibility for an orientation.
+    func detailsPanelLastVisible(for orientation: PanelOrientation) -> Bool {
+        switch orientation {
+        case .portrait:
+            return portraitDetailsPanelLastVisible
+        case .landscape:
+            return landscapeDetailsPanelLastVisible
+        }
+    }
+
+    /// Default side column width in the corner player layout.
+    static let defaultCornerPanelColumnWidth: CGFloat = 380
+
+    /// Width of the side column in the corner player layout (iPad/macOS).
+    /// User can resize via drag gesture. Persisted across sessions.
+    var cornerPanelColumnWidth: CGFloat {
+        get {
+            if let cached = _cornerPanelColumnWidth { return cached }
+            let value = double(for: .cornerPanelColumnWidth)
+            return value > 0 ? CGFloat(value) : Self.defaultCornerPanelColumnWidth
+        }
+        set {
+            _cornerPanelColumnWidth = newValue
+            set(Double(newValue), for: .cornerPanelColumnWidth)
+        }
+    }
+
+    /// Whether the details panel is pinned (side-by-side) in the wide layout.
+    /// iPad/macOS default to pinned; iPhone is floating-only and always
+    /// resolves to `false` regardless of the stored value.
     var landscapeDetailsPanelPinned: Bool {
         get {
+            if PanelSettings.isSectionsOnlyDevice { return false }
             if let cached = _landscapeDetailsPanelPinned { return cached }
-            return bool(for: .landscapeDetailsPanelPinned, default: false)
+            return bool(for: .landscapeDetailsPanelPinned, default: true)
         }
         set {
             _landscapeDetailsPanelPinned = newValue

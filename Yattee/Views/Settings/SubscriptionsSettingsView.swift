@@ -20,10 +20,6 @@ private struct ExportFile: Identifiable {
 struct SubscriptionsSettingsView: View {
     @Environment(\.appEnvironment) private var appEnvironment
 
-    // Account selection state
-    @State private var pendingAccountChange: SubscriptionAccount?
-    @State private var showingAccountSwitchConfirmation = false
-
     // Import state
     @State private var showingImportPicker = false
     @State private var isImporting = false
@@ -47,14 +43,6 @@ struct SubscriptionsSettingsView: View {
         appEnvironment?.dataManager
     }
 
-    private var settingsManager: SettingsManager? {
-        appEnvironment?.settingsManager
-    }
-
-    private var validator: SubscriptionAccountValidator? {
-        appEnvironment?.subscriptionAccountValidator
-    }
-
     private var subscriptionService: SubscriptionService? {
         appEnvironment?.subscriptionService
     }
@@ -69,20 +57,31 @@ struct SubscriptionsSettingsView: View {
         dataManager?.subscriptionCount ?? 0
     }
 
-    private var currentAccount: SubscriptionAccount {
-        settingsManager?.subscriptionAccount ?? .local
+    private var currentContext: DataContext {
+        appEnvironment?.accountsManager.currentContext ?? .local
+    }
+
+    /// What the counts and the export are actually read from.
+    ///
+    /// While the selected account is unavailable that is the local store — so a
+    /// count or a file described as the account's would name a source it never
+    /// came from. The selection itself is untouched, and the moment the account
+    /// is usable again this follows it back.
+    private var effectiveContext: DataContext {
+        appEnvironment?.dataContextValidator.effectiveContext ?? currentContext
     }
 
     var body: some View {
         List {
             accountSection
-            if validator?.hasAvailableAccounts == true {
-                importSection
-                exportSection
-                localDataSection
-            }
+            importSection
+            exportSection
+            localDataSection
         }
-        .task(id: currentAccount) {
+        // Keyed to the effective context, not the selection: an account going
+        // unavailable — or coming back — changes which store the count is read
+        // from without the selection moving at all.
+        .task(id: effectiveContext) {
             await refreshAccountSubscriptionCount()
         }
         .navigationTitle(String(localized: "settings.subscriptions.title"))
@@ -118,20 +117,6 @@ struct SubscriptionsSettingsView: View {
             }
         }
         .confirmationDialog(
-            String(localized: "settings.subscriptions.account.switch.title"),
-            isPresented: $showingAccountSwitchConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button(String(localized: "settings.subscriptions.account.switch.action")) {
-                confirmAccountSwitch()
-            }
-            Button(String(localized: "common.cancel"), role: .cancel) {
-                cancelAccountSwitch()
-            }
-        } message: {
-            Text(String(localized: "settings.subscriptions.account.switch.message"))
-        }
-        .confirmationDialog(
             String(localized: "settings.subscriptions.localData.delete.confirmation.title \(localSubscriptionCount)"),
             isPresented: $showingDeleteLocalConfirmation,
             titleVisibility: .visible
@@ -149,73 +134,13 @@ struct SubscriptionsSettingsView: View {
 
     @ViewBuilder
     private var accountSection: some View {
-        Section {
-            if let validator, validator.hasAvailableAccounts {
-                Picker(
-                    String(localized: "settings.subscriptions.account.label"),
-                    selection: Binding(
-                        get: { currentAccount },
-                        set: { newAccount in
-                            if newAccount != currentAccount {
-                                pendingAccountChange = newAccount
-                                showingAccountSwitchConfirmation = true
-                            }
-                        }
-                    )
-                ) {
-                    ForEach(validator.availableAccounts, id: \.self) { account in
-                        Text(validator.displayName(for: account))
-                            .tag(account)
-                    }
-                }
-            } else {
-                // No accounts available - show setup prompt
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(
-                        String(localized: "settings.subscriptions.account.noAccounts.title"),
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .foregroundStyle(.secondary)
-
-                    Text(String(localized: "settings.subscriptions.account.noAccounts.message"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Button(String(localized: "settings.subscriptions.account.noAccounts.action")) {
-                        appEnvironment?.navigationCoordinator.navigate(to: .settings)
-                    }
-                    .font(.caption)
-                    .padding(.top, 4)
-                }
-                .padding(.vertical, 4)
-            }
-        } footer: {
-            if validator?.hasAvailableAccounts == true {
+        if DataContextSwitcherVisibility.showsSwitcher(in: appEnvironment) {
+            Section {
+                DataContextSwitcherSettingsRow()
+            } footer: {
                 Text(String(localized: "settings.subscriptions.account.footer"))
             }
         }
-    }
-
-    // MARK: - Account Switch Actions
-
-    private func confirmAccountSwitch() {
-        guard let newAccount = pendingAccountChange else { return }
-
-        settingsManager?.subscriptionAccount = newAccount
-        SubscriptionFeedCache.shared.handleAccountChange()
-
-        // Trigger feed refresh in background
-        Task {
-            guard let appEnvironment else { return }
-            await SubscriptionFeedCache.shared.refresh(using: appEnvironment)
-        }
-
-        pendingAccountChange = nil
-        LoggingService.shared.logSubscriptions("Switched subscription account to: \(String(describing: newAccount.type))")
-    }
-
-    private func cancelAccountSwitch() {
-        pendingAccountChange = nil
     }
 
     // MARK: - Import Section
@@ -278,7 +203,7 @@ struct SubscriptionsSettingsView: View {
     /// is active. Hidden in local mode, where the account IS the local store.
     @ViewBuilder
     private var localDataSection: some View {
-        if currentAccount.type != .local && localSubscriptionCount > 0 {
+        if !currentContext.isLocal && localSubscriptionCount > 0 {
             Section {
                 Button(role: .destructive) {
                     showingDeleteLocalConfirmation = true
@@ -372,11 +297,15 @@ struct SubscriptionsSettingsView: View {
         }
     }
 
-    /// Exports subscriptions of the active account: the local store in local
-    /// mode, or the server's list for Invidious/Piped accounts.
+    /// Exports subscriptions of whatever is being read from: the local store in
+    /// local mode, or the server's list for Invidious/Piped accounts.
+    ///
+    /// The branch follows the effective context because the fetch below does —
+    /// branching on the selection instead would take the server path only to
+    /// export local data through it.
     private func performExport() async {
         let subscriptions: [Subscription]
-        if currentAccount.type == .local {
+        if effectiveContext.isLocal {
             guard let dataManager else { return }
             subscriptions = dataManager.allSubscriptions
         } else {
@@ -426,14 +355,23 @@ struct SubscriptionsSettingsView: View {
     }
 
     /// Refreshes the account-scoped subscription count shown in the export footer.
+    ///
+    /// The context the fetch was started for is rechecked before its answer is
+    /// applied. A selection change would already have been fenced by the
+    /// service's provider generation, but the fallback to local is driven by the
+    /// account's availability and announces nothing — so a count still in flight
+    /// would otherwise land under the local heading it never came from.
     private func refreshAccountSubscriptionCount() async {
         guard let subscriptionService else { return }
 
         if let cached = subscriptionService.cachedSubscriptionCount {
             accountSubscriptionCount = cached
         }
-        if subscriptionService.currentAccountType != .local {
+
+        let context = effectiveContext
+        if !context.isLocal {
             if let channels = try? await subscriptionService.fetchSubscriptions() {
+                guard effectiveContext == context else { return }
                 accountSubscriptionCount = channels.count
             }
         }

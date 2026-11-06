@@ -15,6 +15,7 @@ struct CommentView: View {
     let videoID: String?
     let source: ContentSource?
     let isReply: Bool
+    let showAvatar: Bool
 
     @State private var replies: [Comment] = []
     @State private var isLoadingReplies = false
@@ -26,18 +27,21 @@ struct CommentView: View {
     private var navigationCoordinator: NavigationCoordinator? { appEnvironment?.navigationCoordinator }
     private var accentColor: Color { appEnvironment?.settingsManager.resolvedAccentColor ?? .accentColor }
 
-    init(comment: Comment, videoID: String? = nil, source: ContentSource? = nil, isReply: Bool = false) {
+    init(comment: Comment, videoID: String? = nil, source: ContentSource? = nil, isReply: Bool = false, showAvatar: Bool = true) {
         self.comment = comment
         self.videoID = videoID
         self.source = source
         self.isReply = isReply
+        self.showAvatar = showAvatar
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
                 // Author avatar
-                authorAvatar
+                if showAvatar {
+                    authorAvatar
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     // Author name and badges
@@ -184,6 +188,19 @@ struct CommentView: View {
 
     // MARK: - Replies Section
 
+    /// Leading inset that lines the replies toggle up with the comment text:
+    /// the avatar column (avatar width + spacing) when avatars show, else
+    /// nothing.
+    private var contentIndent: CGFloat {
+        showAvatar ? 44 : 0
+    }
+
+    /// Leading inset for the nested replies. Without avatars a smaller
+    /// inset still marks the hierarchy.
+    private var repliesIndent: CGFloat {
+        showAvatar ? 44 : 16
+    }
+
     @ViewBuilder
     private var repliesSection: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -217,19 +234,19 @@ struct CommentView: View {
                 #endif
             }
             .buttonStyle(.plain)
-            .padding(.leading, 44) // Align with comment content (avatar width + spacing)
+            .padding(.leading, contentIndent)
             .padding(.bottom, 8)
 
             // Replies list
             if showReplies {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(replies) { reply in
-                        CommentView(comment: reply, source: source, isReply: true)
-                            .padding(.leading, 44)
+                        CommentView(comment: reply, source: source, isReply: true, showAvatar: showAvatar)
+                            .padding(.leading, repliesIndent)
 
                         if reply.id != replies.last?.id {
                             Divider()
-                                .padding(.leading, 44)
+                                .padding(.leading, repliesIndent)
                         }
                     }
 
@@ -241,7 +258,7 @@ struct CommentView: View {
                                 .padding(.vertical, 8)
                             Spacer()
                         }
-                        .padding(.leading, 44)
+                        .padding(.leading, repliesIndent)
                     } else if repliesContinuation != nil {
                         Button {
                             Task { await loadReplies() }
@@ -258,7 +275,7 @@ struct CommentView: View {
                                 #endif
                         }
                         .buttonStyle(.plain)
-                        .padding(.leading, 44)
+                        .padding(.leading, repliesIndent)
                         .padding(.vertical, 8)
                     }
                 }

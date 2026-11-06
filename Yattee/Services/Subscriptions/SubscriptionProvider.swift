@@ -12,9 +12,6 @@ import Foundation
 /// Each provider implementation handles a specific subscription source.
 @MainActor
 protocol SubscriptionProvider: Sendable {
-    /// The type of subscription account this provider handles.
-    var accountType: SubscriptionAccountType { get }
-
     /// Fetches all subscriptions from the provider.
     /// - Returns: Array of channels the user is subscribed to.
     func fetchSubscriptions() async throws -> [Channel]
@@ -35,6 +32,10 @@ protocol SubscriptionProvider: Sendable {
     /// The subscription count known without a network fetch.
     /// Returns nil when the provider hasn't populated its cache yet.
     var cachedSubscriptionCount: Int? { get }
+
+    /// The subscribed channels known without a network fetch.
+    /// Returns nil when the provider hasn't populated its cache yet.
+    var cachedSubscriptions: [Channel]? { get }
 
     /// Refreshes the local cache of subscriptions from the remote source.
     /// For local provider, this is a no-op.

@@ -9,10 +9,17 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(\.appEnvironment) private var appEnvironment
+    @Environment(\.presentAppSheet) private var presentAppSheet
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
     @Environment(\.scenePhase) private var scenePhase
     #if !os(tvOS) && !os(macOS)
     @Namespace private var sheetTransition
     #endif
+    /// The device's own playlists. In an account context the card reads the
+    /// remote playlists cache instead — the same store the playlists screen
+    /// this shortcut leads to shows.
     @State private var playlists: [LocalPlaylist] = []
     @State private var bookmarksCount: Int = 0
     @State private var recentBookmarks: [Bookmark] = []
@@ -20,18 +27,87 @@ struct HomeView: View {
     @State private var recentContinueWatching: [WatchEntry] = []
     @State private var historyCount: Int = 0
     @State private var recentHistory: [WatchEntry] = []
+    /// The account's server-side history, when that is what the history screen
+    /// would show. `nil` in local mode — and while the account's first fetch is
+    /// still out, which is what keeps the local numbers off an account's card.
+    @State private var serverHistory: ServerHistorySnapshot?
+    /// Which server-history load the state belongs to. Cancelling is not
+    /// enough on its own: a page that already came back races the switch, and
+    /// its rows would land on a context nobody is looking at any more.
+    @State private var serverHistoryGeneration = 0
     #if !os(tvOS) && !os(macOS)
     @State private var showingSettings = false
     #endif
-    @State private var showingOpenLink = false
     @State private var showingRemoteControl = false
     @State private var showingCustomizeHome = false
     @State private var channelsCount: Int = 0
     @State private var discoveredDevicesCount: Int = 0
     @State private var feedCache = SubscriptionFeedCache.shared
+    #if os(tvOS)
+    /// Whether the first pass over the Home data has finished. Every section
+    /// reads empty before it does, so the empty state waits for this rather than
+    /// flashing over content that is on its way.
+    @State private var hasLoadedHomeData = false
+    #endif
+
+    /// What one probe of the account's server history brought back.
+    private struct ServerHistorySnapshot {
+        /// How many entries the probe saw, or `nil` when the fetch failed.
+        var count: Int?
+        /// The probe came back full, so the history goes on past what it saw
+        /// and `count` is a floor, not a total — the server has no count call.
+        var countIsLowerBound = false
+        /// The leading entries, hydrated for the section's rows.
+        var videos: [Video] = []
+    }
+
+    /// How many IDs the server-history probe asks for in its single page.
+    ///
+    /// Large enough that most histories fit and the card shows a real total;
+    /// a history that fills it shows this number as a floor instead. IDs only
+    /// — nothing is hydrated past the section's few rows — so the size costs
+    /// the server one array slice.
+    private static let serverHistoryProbeSize = 500
 
     private var dataManager: DataManager? { appEnvironment?.dataManager }
     private var settingsManager: SettingsManager? { appEnvironment?.settingsManager }
+
+    // MARK: - Context
+
+    /// The account whose data Home is showing, or `nil` when it is the device's.
+    ///
+    /// The *effective* context, so a selected account that cannot be used right
+    /// now shows the local numbers — the same fallback the screens the
+    /// shortcuts lead to make.
+    private var contextAccount: Account? {
+        guard let appEnvironment,
+              case let .account(id) = appEnvironment.dataContextValidator.effectiveContext
+        else { return nil }
+
+        return appEnvironment.accountsManager.account(id: id)
+    }
+
+    /// Whose history the card and the section read — resolved by the same rule
+    /// as the history screen, so the shortcut can never promise a history the
+    /// screen behind it will not show.
+    private var historyDisplayMode: HistoryDisplayMode {
+        guard let appEnvironment else { return .local }
+        let account = contextAccount
+
+        return HistoryDisplayMode.resolve(
+            effectiveContext: appEnvironment.dataContextValidator.effectiveContext,
+            account: account,
+            capabilities: account.flatMap { appEnvironment.accountsManager.capabilities(for: $0) }
+        )
+    }
+
+    /// The account's playlists as last fetched, or `nil` in local mode — read
+    /// live from the same cache the playlists screen shows, so a create or a
+    /// delete there moves this count without a reload.
+    private var remotePlaylists: [Playlist]? {
+        guard let appEnvironment, let account = contextAccount else { return nil }
+        return appEnvironment.remotePlaylistsCache.playlists(for: account.id)
+    }
 
     private var accentColor: Color {
         appEnvironment?.settingsManager.resolvedAccentColor ?? .accentColor
@@ -74,7 +150,14 @@ struct HomeView: View {
         appEnvironment?.settingsManager.listStyle ?? .inset
     }
 
+
     var body: some View {
+        // Split from `chrome` so the modifier chain stays within what the
+        // type-checker will resolve in one expression.
+        dataObservers(chrome)
+    }
+
+    private var chrome: some View {
         mainContent
         #if !os(tvOS)
         .navigationTitle(String(localized: "tabs.home"))
@@ -86,6 +169,16 @@ struct HomeView: View {
         .toolbarTitleDisplayMode(.inlineLarge)
         #endif
         .toolbar {
+            // No switcher wherever a sidebar shows one: the macOS sidebar row
+            // and the iPad sidebar's bottom bar are the persistent switcher
+            // surfaces there, so the toolbar menu is compact-width-only.
+            #if !os(tvOS) && !os(macOS)
+            if DataContextSwitcherVisibility.showsToolbarPickers(in: appEnvironment, horizontalSizeClass: horizontalSizeClass) {
+                ToolbarItem(placement: .primaryAction) {
+                    DataContextSwitcherMenu()
+                }
+            }
+            #endif
             #if !os(tvOS) && !os(macOS)
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -104,16 +197,16 @@ struct HomeView: View {
             SettingsView()
                 .liquidGlassSheetContent(sourceID: "homeSettings", in: sheetTransition)
         }
-        .onChange(of: appEnvironment?.navigationCoordinator.dismissSettingsTrigger) {
-            showingSettings = false
+        .dismissesOnExternalNavigation($showingSettings)
+        .onAppear { presentPendingSettingsSheet() }
+        .onChange(of: appEnvironment?.navigationCoordinator.router.pendingSettingsSheet) { _, _ in
+            presentPendingSettingsSheet()
         }
         #endif
-        .sheet(isPresented: $showingOpenLink) {
-            OpenLinkSheet()
-        }
         .sheet(isPresented: $showingRemoteControl) {
             RemoteDevicesSheet()
         }
+        .dismissesOnExternalNavigation($showingRemoteControl)
         #if !os(tvOS)
         .sheet(isPresented: $showingCustomizeHome) {
             NavigationStack {
@@ -130,6 +223,7 @@ struct HomeView: View {
             .frame(minWidth: 500, minHeight: 450)
             #endif
         }
+        .dismissesOnExternalNavigation($showingCustomizeHome)
         #endif
         .onAppear {
             loadData()
@@ -142,6 +236,13 @@ struct HomeView: View {
         .task {
             await feedCache.loadFromDiskIfNeeded()
             await appEnvironment?.homeInstanceCache.loadFromDiskIfNeeded()
+            #if os(tvOS)
+            // The disk caches are the last of the on-device data to land, so the
+            // empty state is honest from here on. A network refresh below can
+            // still add content later; it must not hold an empty Home behind a
+            // spinner for as long as a request can take.
+            hasLoadedHomeData = true
+            #endif
             await refreshHomeInstanceContent()
         }
         .onChange(of: appEnvironment?.navigationCoordinator.isPlayerExpanded) { _, isExpanded in
@@ -150,8 +251,8 @@ struct HomeView: View {
                 loadData()
             }
         }
-        .onChange(of: appEnvironment?.navigationCoordinator.selectedTab) { _, newTab in
-            if newTab == .home {
+        .onChange(of: appEnvironment?.navigationCoordinator.router.selection) { _, newSelection in
+            if newSelection == .home {
                 loadData()
             }
         }
@@ -160,12 +261,26 @@ struct HomeView: View {
                 loadData()
             }
         }
+    }
+
+    /// The notification subscriptions, hung on the content as one group.
+    private func dataObservers(_ content: some View) -> some View {
+        content
         .onReceive(NotificationCenter.default.publisher(for: .bookmarksDidChange)) { _ in
             loadBookmarksData()
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
-            loadHistoryData()
+            // The device's own history changed; an account's server history is
+            // told about below, and a local write is not news about it.
+            loadLocalHistoryData()
             loadContinueWatchingData()
+        }
+        // A watch was posted to the account's server history — the count and
+        // the section's front rows just moved.
+        .onReceive(NotificationCenter.default.publisher(for: .serverWatchHistoryDidUpdate)) { _ in
+            if case .server = historyDisplayMode {
+                loadServerHistoryIfNeeded()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .playlistsDidChange)) { _ in
             loadPlaylistsData()
@@ -173,13 +288,50 @@ struct HomeView: View {
         .onReceive(NotificationCenter.default.publisher(for: .subscriptionsDidChange)) { _ in
             loadChannelsData()
         }
+        // Selecting another account — or local — changes whose channels count
+        // and feed this is. AppEnvironment already swapped or cleared the
+        // account-scoped caches; this re-reads the counts and, when the feed
+        // section is on Home, refills the feed the clearing just emptied.
+        .onReceive(NotificationCenter.default.publisher(for: .dataContextDidChange)) { _ in
+            loadData()
+            refreshFeedIfNeeded()
+        }
+        // The same, without the context moving: the credential behind the
+        // account was replaced, so the counts may now be someone else's.
+        .onReceive(NotificationCenter.default.publisher(for: .accountCredentialDidChange)) { _ in
+            loadData()
+            refreshFeedIfNeeded()
+        }
+        // A status, an account or an instance changing moves reads between the
+        // account and local without the stored context moving at all.
+        .onReceive(NotificationCenter.default.publisher(for: .accountStatusesDidChange)) { _ in
+            loadData()
+            refreshFeedIfNeeded()
+        }
     }
+
+    #if !os(tvOS) && !os(macOS)
+    /// Presents Settings for a request the layout had no Settings section for.
+    /// Deferred a turn: the same external navigation also dismisses sheets,
+    /// and that reset must not land after this one.
+    private func presentPendingSettingsSheet() {
+        guard let router = appEnvironment?.navigationCoordinator.router,
+              router.pendingSettingsSheet else { return }
+        router.pendingSettingsSheet = false
+        Task { @MainActor in
+            showingSettings = true
+        }
+    }
+    #endif
 
     // MARK: - Main Content
 
     #if os(tvOS)
     /// True on tvOS when no Home section would render content — prevents a focus trap
-    /// on fresh installs where the detail pane would otherwise be completely empty.
+    /// where the detail pane would otherwise be completely empty.
+    ///
+    /// Each case mirrors what `sectionView(for:)` actually renders: a section with
+    /// nothing to show renders nothing, so it must not count as content here.
     private var isHomeEmpty: Bool {
         let sections = settingsManager?.visibleSections() ?? HomeSectionItem.defaultOrder.filter { HomeSectionItem.defaultVisibility[$0] == true }
         for section in sections {
@@ -191,28 +343,67 @@ struct HomeView: View {
             case .bookmarks:
                 if !recentBookmarks.isEmpty { return false }
             case .history:
-                if !recentHistory.isEmpty { return false }
+                if case .server = historyDisplayMode {
+                    if !(serverHistory?.videos.isEmpty ?? true) { return false }
+                } else if !recentHistory.isEmpty {
+                    return false
+                }
             case .downloads:
                 break
-            case .instanceContent, .mediaSource:
-                return false
+            case .remoteServers:
+                if !homeRemoteServers.isEmpty { return false }
+            case .fileSources:
+                if !homeFileSources.isEmpty { return false }
+            case .instanceContent(let instanceID, let contentType):
+                if hasInstanceContent(instanceID: instanceID, contentType: contentType) { return false }
+            case .mediaSource:
+                // Legacy, stripped on load and rendered as empty.
+                break
             }
         }
         return true
     }
 
+    /// Whether an instance content section has something to render, matching the
+    /// conditions in `instanceContentSection(instanceID:contentType:)`.
+    private func hasInstanceContent(instanceID: UUID, contentType: InstanceContentType) -> Bool {
+        guard let instance = appEnvironment?.instancesManager.instances.first(where: { $0.id == instanceID }),
+              instance.isEnabled,
+              let videos = appEnvironment?.homeInstanceCache.videos(for: instanceID, contentType: contentType) else {
+            return false
+        }
+        return !videos.isEmpty
+    }
+
+    /// Whether any source is configured, read from the same managers the Sources
+    /// screen builds its list from. An empty Home is not the same thing as a
+    /// fresh install: with sources already added, telling the user to add one is
+    /// simply wrong.
+    private var hasConfiguredSources: Bool {
+        let hasInstances = !(appEnvironment?.instancesManager.instances.isEmpty ?? true)
+        let hasMediaSources = !(appEnvironment?.mediaSourcesManager.sources.isEmpty ?? true)
+        return hasInstances || hasMediaSources
+    }
+
     private var emptyHomeView: some View {
         VStack(spacing: 32) {
             VStack(spacing: 12) {
-                Text(String(localized: "home.tvos.empty.title"))
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text(String(localized: "home.tvos.empty.message"))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                if hasConfiguredSources {
+                    // Sources are set up, Home simply has nothing to show yet.
+                    Text(String(localized: "common.noContent"))
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                } else {
+                    Text(String(localized: "home.tvos.empty.title"))
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text(String(localized: "home.tvos.empty.message"))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
             }
             Button {
-                appEnvironment?.navigationCoordinator.selectedSidebarItem = .sources
+                appEnvironment?.navigationCoordinator.router.select(.sources)
             } label: {
                 Label(String(localized: "home.tvos.empty.openSources"), systemImage: "externaldrive.connected.to.line.below")
                     .padding(.horizontal, 16)
@@ -222,13 +413,22 @@ struct HomeView: View {
         .padding(60)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    private var loadingHomeView: some View {
+        ProgressView()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
     #endif
 
     @ViewBuilder
     private var mainContent: some View {
         #if os(tvOS)
         if isHomeEmpty {
-            emptyHomeView
+            if hasLoadedHomeData {
+                emptyHomeView
+            } else {
+                loadingHomeView
+            }
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -527,7 +727,7 @@ struct HomeView: View {
 
     private var openURLShortcutCard: some View {
         Button {
-            showingOpenLink = true
+            presentAppSheet(.openLink(nil))
         } label: {
             HomeShortcutCardView(
                 icon: "link",
@@ -579,8 +779,8 @@ struct HomeView: View {
             HomeShortcutCardView(
                 icon: "list.bullet.rectangle",
                 title: String(localized: "home.playlists.title"),
-                count: playlists.count,
-                subtitle: formatCount(playlists.count, singular: "home.count.playlist", plural: "home.count.playlists"),
+                count: playlistsCardCount,
+                subtitle: playlistsCardSubtitle,
                 colorfulColor: HomeShortcutItem.playlists.cardColor
             )
         }
@@ -639,8 +839,8 @@ struct HomeView: View {
             HomeShortcutCardView(
                 icon: "clock",
                 title: String(localized: "home.history.title"),
-                count: historyCount,
-                subtitle: formatCount(historyCount, singular: "home.count.video", plural: "home.count.videos"),
+                count: historyCardCount,
+                subtitle: historyCardSubtitle,
                 colorfulColor: HomeShortcutItem.history.cardColor
             )
         }
@@ -789,7 +989,7 @@ struct HomeView: View {
 
     private var openURLShortcutRow: some View {
         Button {
-            showingOpenLink = true
+            presentAppSheet(.openLink(nil))
         } label: {
             HomeShortcutRowView(
                 icon: "link",
@@ -825,7 +1025,7 @@ struct HomeView: View {
             HomeShortcutRowView(
                 icon: "list.bullet.rectangle",
                 title: String(localized: "home.playlists.title"),
-                subtitle: formatCount(playlists.count, singular: "home.count.playlist", plural: "home.count.playlists")
+                subtitle: playlistsCardSubtitle
             )
         }
         .buttonStyle(.plain)
@@ -864,7 +1064,7 @@ struct HomeView: View {
             HomeShortcutRowView(
                 icon: "clock",
                 title: String(localized: "home.history.title"),
-                subtitle: formatCount(historyCount, singular: "home.count.video", plural: "home.count.videos")
+                subtitle: historyCardSubtitle
             )
         }
         .buttonStyle(.plain)
@@ -963,10 +1163,49 @@ struct HomeView: View {
     }
 
     /// Formats a count with compact notation and proper singular/plural form.
-    private func formatCount(_ count: Int, singular: String.LocalizationValue, plural: String.LocalizationValue) -> String {
-        let formattedCount = CountFormatter.compact(count)
+    ///
+    /// `lowerBound` marks a count the source could only see the start of — a
+    /// server history longer than one probe — and reads "500+ videos".
+    private func formatCount(_ count: Int, singular: String.LocalizationValue, plural: String.LocalizationValue, lowerBound: Bool = false) -> String {
+        let formattedCount = CountFormatter.compact(count) + (lowerBound ? "+" : "")
         let key = count == 1 ? singular : plural
         return String(localized: "\(formattedCount) \(String(localized: key))")
+    }
+
+    // MARK: - Context-Scoped Card Values
+
+    /// What the playlists card counts: the account's server-side list when one
+    /// is selected, the device's own otherwise.
+    private var playlistsCardCount: Int {
+        guard contextAccount != nil else { return playlists.count }
+        return remotePlaylists?.count ?? 0
+    }
+
+    /// An account list that has not come back yet says so rather than showing
+    /// a zero that is really "not asked yet".
+    private var playlistsCardSubtitle: String {
+        if contextAccount != nil, remotePlaylists == nil { return "—" }
+        return formatCount(playlistsCardCount, singular: "home.count.playlist", plural: "home.count.playlists")
+    }
+
+    private var historyCardCount: Int {
+        guard case .server = historyDisplayMode else { return historyCount }
+        return serverHistory?.count ?? 0
+    }
+
+    private var historyCardSubtitle: String {
+        guard case .server = historyDisplayMode else {
+            return formatCount(historyCount, singular: "home.count.video", plural: "home.count.videos")
+        }
+        // Still fetching, or the fetch failed — either way the local number
+        // is not this account's, so the card holds its tongue instead.
+        guard let count = serverHistory?.count else { return "—" }
+        return formatCount(
+            count,
+            singular: "home.count.video",
+            plural: "home.count.videos",
+            lowerBound: serverHistory?.countIsLowerBound == true
+        )
     }
     
     // MARK: - Queue Support
@@ -1044,7 +1283,11 @@ struct HomeView: View {
                 bookmarksSection
             }
         case .history:
-            if !recentHistory.isEmpty {
+            if case .server = historyDisplayMode {
+                if let videos = serverHistory?.videos, !videos.isEmpty {
+                    serverHistorySection(videos: videos)
+                }
+            } else if !recentHistory.isEmpty {
                 historySection
             }
         case .downloads:
@@ -1055,6 +1298,14 @@ struct HomeView: View {
             #else
             EmptyView()
             #endif
+        case .remoteServers:
+            if !homeRemoteServers.isEmpty {
+                remoteServersSection
+            }
+        case .fileSources:
+            if !homeFileSources.isEmpty {
+                fileSourcesSection
+            }
         case .instanceContent(let instanceID, let contentType):
             instanceContentSection(instanceID: instanceID, contentType: contentType)
         case .mediaSource:
@@ -1063,6 +1314,141 @@ struct HomeView: View {
             // unreachable in practice. Rendered as empty for defense-in-depth.
             EmptyView()
         }
+    }
+
+    // MARK: - Sources Sections
+
+    /// Enabled remote servers in the Sources screen's order.
+    private var homeRemoteServers: [Instance] {
+        let instances = appEnvironment?.instancesManager.enabledInstances ?? []
+        return appEnvironment?.sourcesSettings.sorted(instances) ?? instances
+    }
+
+    /// Enabled file sources in the Sources screen's order.
+    private var homeFileSources: [MediaSource] {
+        let sources = appEnvironment?.mediaSourcesManager.enabledSources ?? []
+        return appEnvironment?.sourcesSettings.sorted(sources) ?? sources
+    }
+
+    private var remoteServersSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionHeader(title: "sources.section.remoteServers") {
+                appEnvironment?.navigationCoordinator.navigate(to: .mediaSources)
+            }
+
+            VideoListContent(listStyle: listStyle) {
+                let instances = homeRemoteServers
+                ForEach(Array(instances.enumerated()), id: \.element.id) { index, instance in
+                    SourceListRow(isLast: index == instances.count - 1, listStyle: listStyle) {
+                        Button {
+                            appEnvironment?.navigationCoordinator.navigate(to: .instanceBrowse(instance))
+                        } label: {
+                            homeSourceRow(
+                                systemImage: instance.type.systemImage,
+                                name: instance.displayName,
+                                detail: "\(instance.type.displayName) - \(instance.url.host ?? instance.url.absoluteString)"
+                            )
+                        }
+                        #if os(macOS)
+                        .buttonStyle(.plain)
+                        #elseif os(tvOS)
+                        .buttonStyle(TVHomeRowButtonStyle())
+                        #else
+                        .foregroundStyle(.primary)
+                        #endif
+                    }
+                }
+            }
+        }
+    }
+
+    private var fileSourcesSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionHeader(title: "sources.section.fileSources") {
+                appEnvironment?.navigationCoordinator.navigate(to: .mediaSources)
+            }
+
+            VideoListContent(listStyle: listStyle) {
+                let sources = homeFileSources
+                ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
+                    let needsPassword = appEnvironment?.mediaSourcesManager.needsPassword(for: source) ?? false
+                    SourceListRow(isLast: index == sources.count - 1, listStyle: listStyle) {
+                        Button {
+                            if needsPassword {
+                                // The browser can't open without credentials; the
+                                // Sources screen holds the edit flow that fixes it.
+                                appEnvironment?.navigationCoordinator.navigate(to: .mediaSources)
+                            } else {
+                                appEnvironment?.navigationCoordinator.navigate(to: .mediaBrowser(source, path: "/"))
+                            }
+                        } label: {
+                            homeSourceRow(
+                                systemImage: source.type.systemImage,
+                                name: source.name,
+                                detail: "\(source.type.displayName) - \(source.urlDisplayString)",
+                                needsPassword: needsPassword
+                            )
+                        }
+                        #if os(macOS)
+                        .buttonStyle(.plain)
+                        #elseif os(tvOS)
+                        .buttonStyle(TVHomeRowButtonStyle())
+                        #else
+                        .foregroundStyle(.primary)
+                        #endif
+                    }
+                }
+            }
+        }
+    }
+
+    /// Row content matching the Sources screen's listing.
+    private func homeSourceRow(systemImage: String, name: String, detail: String, needsPassword: Bool = false) -> some View {
+        #if os(tvOS)
+        let rowSpacing: CGFloat = 24
+        #else
+        let rowSpacing: CGFloat = 12
+        #endif
+        #if os(macOS)
+        let iconFont: Font = .title3
+        let iconFrameWidth: CGFloat = 24
+        let titleFont: Font = .body
+        #else
+        let iconFont: Font = .title2
+        let iconFrameWidth: CGFloat = 32
+        let titleFont: Font = .headline
+        #endif
+        return HStack(spacing: rowSpacing) {
+            Image(systemName: systemImage)
+                .font(iconFont)
+                .foregroundStyle(.tint)
+                .frame(width: iconFrameWidth)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(titleFont)
+                    .foregroundStyle(.primary)
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if needsPassword {
+                    Label(String(localized: "sources.status.authRequired"), systemImage: "key.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Spacer()
+
+            #if !os(macOS)
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            #endif
+        }
+        .contentShape(Rectangle())
     }
 
     private var continueWatchingSection: some View {
@@ -1284,6 +1670,47 @@ struct HomeView: View {
         }
     }
 
+    /// The account's recent server-side history, already hydrated and limited.
+    ///
+    /// Plain video rows, no swipe delete: a server delete belongs to the full
+    /// history screen, which owns the confirmation and the error for it.
+    private func serverHistorySection(videos: [Video]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionHeader(title: "home.recentHistory.title") {
+                appEnvironment?.navigationCoordinator.navigate(to: .history)
+            }
+
+            if sectionLayout == .grid {
+                HomeHorizontalCards(
+                    videos: videos,
+                    queueSource: recentHistoryQueueSource,
+                    sourceLabel: String(localized: "queue.source.history"),
+                    loadMoreVideos: loadMoreRecentHistoryCallback
+                )
+            } else {
+                VideoListContent(listStyle: listStyle) {
+                    ForEach(Array(videos.enumerated()), id: \.element.id) { index, video in
+                        VideoListRow(
+                            isLast: index == videos.count - 1,
+                            rowStyle: .regular,
+                            listStyle: listStyle
+                        ) {
+                            VideoRowView(video: video, style: .regular)
+                                .tappableVideo(
+                                    video,
+                                    queueSource: recentHistoryQueueSource,
+                                    sourceLabel: String(localized: "queue.source.history"),
+                                    videoList: videos,
+                                    videoIndex: index,
+                                    loadMoreVideos: loadMoreRecentHistoryCallback
+                                )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #if !os(tvOS)
     private func downloadsSection(downloads: [Download]) -> some View {
         let limitedDownloads = Array(downloads.prefix(sectionItemsLimit))
@@ -1453,6 +1880,24 @@ struct HomeView: View {
 
     private func loadPlaylistsData() {
         playlists = dataManager?.playlists() ?? []
+        refreshRemotePlaylistsIfNeeded()
+    }
+
+    /// Asks for the account's playlist list the first time this context needs
+    /// it. Reads come off the cache live, so the count appears when the fetch
+    /// lands and follows every mutation after — this only has to make sure the
+    /// first fetch happens even when the playlists screen was never opened.
+    private func refreshRemotePlaylistsIfNeeded() {
+        guard let appEnvironment, let account = contextAccount,
+              appEnvironment.remotePlaylistsCache.playlists(for: account.id) == nil
+        else { return }
+
+        Task {
+            // The cache fences by account generation and orders results
+            // itself; a failure simply leaves the count reading "—", and the
+            // playlists screen owns showing the error.
+            try? await appEnvironment.remotePlaylistsCache.refreshList(for: account)
+        }
     }
 
     private func loadBookmarksData() {
@@ -1468,8 +1913,104 @@ struct HomeView: View {
     }
 
     private func loadHistoryData() {
+        loadLocalHistoryData()
+        loadServerHistoryIfNeeded()
+    }
+
+    /// The device's own history alone — what a local write changes. The
+    /// account's is the server's to change, and announced separately.
+    private func loadLocalHistoryData() {
         historyCount = dataManager?.watchHistoryCount() ?? 0
         recentHistory = dataManager?.watchHistory(limit: 50) ?? []
+    }
+
+    /// One probe of the account's server history: the count for the card, the
+    /// leading rows for the section.
+    private func loadServerHistoryIfNeeded() {
+        serverHistoryGeneration += 1
+        let generation = serverHistoryGeneration
+
+        guard case let .server(account) = historyDisplayMode, let appEnvironment else {
+            serverHistory = nil
+            return
+        }
+
+        let limit = sectionItemsLimit
+
+        Task {
+            do {
+                let ids = try await appEnvironment.accountService.watchHistory(
+                    page: 1,
+                    maxResults: Self.serverHistoryProbeSize,
+                    for: account
+                )
+                guard generation == serverHistoryGeneration else { return }
+
+                // The server re-bumps a re-watch rather than duplicating it,
+                // but the rows key a ForEach — deduped rather than trusted.
+                var seen = Set<String>()
+                let uniqueIDs = ids.filter { seen.insert($0).inserted }
+
+                let videos = await hydrateServerHistory(
+                    ids: Array(uniqueIDs.prefix(limit)),
+                    account: account,
+                    using: appEnvironment
+                )
+                guard generation == serverHistoryGeneration else { return }
+
+                serverHistory = ServerHistorySnapshot(
+                    count: uniqueIDs.count,
+                    countIsLowerBound: ids.count >= Self.serverHistoryProbeSize,
+                    videos: videos
+                )
+            } catch {
+                guard generation == serverHistoryGeneration else { return }
+                // Failed is not local: the card shows "—" and no section,
+                // never the device's numbers under an account's name.
+                serverHistory = ServerHistorySnapshot(count: nil)
+            }
+        }
+    }
+
+    /// Rows for the leading server-history IDs, from local data where there is
+    /// some — a video watched on this device is already known in full — and a
+    /// metadata fetch for the rest. Bounded by the section limit, so this is a
+    /// handful of requests at most.
+    ///
+    /// A fetch that fails leaves the row as its ID placeholder rather than
+    /// dropping it: the account watched it, and a history missing rows it
+    /// cannot describe is a wrong history.
+    private func hydrateServerHistory(
+        ids: [String],
+        account: Account,
+        using appEnvironment: AppEnvironment
+    ) async -> [Video] {
+        guard let instance = appEnvironment.accountsManager.instance(for: account) else {
+            return ids.map { Video.metadataPlaceholder(for: $0) }
+        }
+
+        let known: [String: Video] = Dictionary(
+            ids.compactMap { id in
+                dataManager?.watchEntry(for: id).map { (id, $0.toVideo()) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return await withTaskGroup(of: (Int, Video).self) { group in
+            for (index, id) in ids.enumerated() {
+                group.addTask { @MainActor in
+                    if let video = known[id] { return (index, video) }
+                    let fetched = try? await appEnvironment.contentService.video(id: id, instance: instance)
+                    return (index, fetched ?? .metadataPlaceholder(for: id))
+                }
+            }
+
+            var videos = [Video?](repeating: nil, count: ids.count)
+            for await (index, video) in group {
+                videos[index] = video
+            }
+            return videos.compactMap { $0 }
+        }
     }
 
     private func loadChannelsData() {
@@ -1483,11 +2024,34 @@ struct HomeView: View {
         if let cached = service.cachedSubscriptionCount {
             channelsCount = cached
         } else {
+            // Captured so a fetch that outlives an account switch cannot land
+            // its count on whichever context is selected by the time it returns.
+            let requestContext = appEnvironment?.dataContextValidator.effectiveContext
             Task {
-                if let channels = try? await service.fetchSubscriptions() {
+                if let channels = try? await service.fetchSubscriptions(),
+                   requestContext == appEnvironment?.dataContextValidator.effectiveContext {
                     channelsCount = channels.count
                 }
             }
+        }
+    }
+
+    /// Refills the feed section after an account switch emptied its cache.
+    ///
+    /// Only when Home actually shows the feed: without the section on screen
+    /// there is nothing to refill, and the Subscriptions tab refreshes for
+    /// itself when opened. The validity/loading gate is the same one
+    /// SubscriptionsView uses, so a switch that kept the cache (a status flap
+    /// fencing rather than clearing) does not refetch what is already there.
+    private func refreshFeedIfNeeded() {
+        guard let appEnvironment else { return }
+
+        let sections = settingsManager?.visibleSections() ?? []
+        guard sections.contains(.feed) else { return }
+        guard !feedCache.isCacheValid(using: settingsManager), !feedCache.isLoading else { return }
+
+        Task {
+            await feedCache.refresh(using: appEnvironment)
         }
     }
 
