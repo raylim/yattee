@@ -894,6 +894,15 @@ final class PlayerService {
         await playQueuedVideo(next)
     }
 
+    /// Plays an explicitly selected queue item, preserving the remaining queue and its metadata.
+    func playQueueItem(id: QueuedVideo.ID) async {
+        guard let item = state.queue.first(where: { $0.id == id }) else { return }
+        pause(saveProgress: state.playbackState != .ended)
+        pushCurrentToHistoryIfNeeded()
+        state.removeFromQueue(id: id)
+        await playQueuedVideo(item)
+    }
+
     /// Pushes current video to history if not in incognito mode.
     private func pushCurrentToHistoryIfNeeded() {
         guard let currentVideo = state.currentVideo,
@@ -2304,6 +2313,21 @@ final class PlayerService {
             LoggingService.shared.warning("Stream selection: Audio mode enabled but no audio-only streams available, falling back to normal selection", category: .player)
         }
 
+        // For live streams, always prefer HLS/DASH (designed for live streaming)
+        // Live streams with direct MP4 URLs (live=1&hang=1) don't work reliably
+        let isLiveStream = streams.contains(where: { $0.isLive })
+        if isLiveStream {
+            if let hlsStream = muxedStreams.first(where: { StreamFormat.detect(from: $0) == .hls }) {
+                LoggingService.shared.debug("Stream selection: Using HLS for live stream", category: .player)
+                return (hlsStream, nil)
+            }
+            if let dashStream = muxedStreams.first(where: { StreamFormat.detect(from: $0) == .dash }) {
+                LoggingService.shared.debug("Stream selection: Using DASH for live stream", category: .player)
+                return (dashStream, nil)
+            }
+            LoggingService.shared.warning("Stream selection: No HLS/DASH available for live stream, falling back to adaptive formats", category: .player)
+        }
+
         // Check for audio-only content (no real video streams available)
         // This handles cases like SoundCloud where HLS is audio-only but not marked as such
         let hasRealVideoStreams = !videoOnlyStreams.isEmpty || muxedStreams.contains { stream in
@@ -2323,21 +2347,6 @@ final class PlayerService {
 
         // Get the maximum resolution based on effective quality preference
         let maxResolution = effectiveQuality.maxResolution
-
-        // For live streams, always prefer HLS/DASH (designed for live streaming)
-        // Live streams with direct MP4 URLs (live=1&hang=1) don't work reliably
-        let isLiveStream = streams.contains(where: { $0.isLive })
-        if isLiveStream {
-            if let hlsStream = muxedStreams.first(where: { StreamFormat.detect(from: $0) == .hls }) {
-                LoggingService.shared.debug("Stream selection: Using HLS for live stream", category: .player)
-                return (hlsStream, nil)
-            }
-            if let dashStream = muxedStreams.first(where: { StreamFormat.detect(from: $0) == .dash }) {
-                LoggingService.shared.debug("Stream selection: Using DASH for live stream", category: .player)
-                return (dashStream, nil)
-            }
-            LoggingService.shared.warning("Stream selection: No HLS/DASH available for live stream, falling back to adaptive formats", category: .player)
-        }
 
         // Note: For non-live videos, we prefer progressive formats (MP4/WebM) over HLS/DASH
         // because they typically offer better quality. HLS/DASH are only used as last resort.

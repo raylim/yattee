@@ -103,10 +103,13 @@ private final class ExpandedPlayerHostingController<Content: View>: UIHostingCon
 
     /// The player is a video-first, mostly non-scrolling UI: keep the status bar horizontal
     /// (iPhone Duo exterior) instead of reserving a trailing column beside the video.
+    // This SDK's UIKit and SwiftUI introduce the foldable layout APIs together.
+    #if canImport(SwiftUI, _version: 8.1)
     @available(iOS 27.1, *)
     override var preferredVerticalBarBehavior: UIVerticalBarBehavior {
         .disabled
     }
+    #endif
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)

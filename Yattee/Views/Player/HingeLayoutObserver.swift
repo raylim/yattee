@@ -53,7 +53,15 @@ struct HingeLayoutObserver: ViewModifier {
                 OrientationManager.shared.canRotateProgrammatically = !isInterior
                 apply(isInterior)
             }
-        } else if #available(iOS 27.1, *) {
+        } else {
+            hingeAwareContent(content)
+        }
+    }
+
+    @ViewBuilder
+    private func hingeAwareContent(_ content: Content) -> some View {
+        #if canImport(SwiftUI, _version: 8.1)
+        if #available(iOS 27.1, *) {
             content.onHingeChange { _, context in
                 // `hinge` is nil on devices without a hinge and when the view
                 // leaves a hierarchy that provides hinge updates.
@@ -70,6 +78,9 @@ struct HingeLayoutObserver: ViewModifier {
         } else {
             content
         }
+        #else
+        content
+        #endif
     }
 }
 
@@ -78,7 +89,9 @@ struct HingeLayoutObserver: ViewModifier {
 private struct HingePresenceObserver: ViewModifier {
     @Binding var hasHinge: Bool
 
+    @ViewBuilder
     func body(content: Content) -> some View {
+        #if canImport(SwiftUI, _version: 8.1)
         if #available(iOS 27.1, *) {
             content.onHingeChange { _, context in
                 // nil also when leaving a hinge-providing hierarchy; keep the last value then
@@ -89,6 +102,9 @@ private struct HingePresenceObserver: ViewModifier {
         } else {
             content
         }
+        #else
+        content
+        #endif
     }
 }
 

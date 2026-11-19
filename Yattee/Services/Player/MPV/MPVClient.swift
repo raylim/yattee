@@ -545,14 +545,13 @@ final class MPVClient: @unchecked Sendable {
         // Cache settings for network streams
         setOptionSync("cache", "yes")
         #if os(tvOS)
-        // Apple TV can decode 1080p60 easily, but aggressively filling a large
-        // demuxer cache during startup competes with the first seconds of
-        // rendering. Keep enough readahead for smooth playback without racing
-        // hundreds of seconds ahead immediately after load/seek.
-        setOptionSync("cache-secs", "30")
-        setOptionSync("demuxer-readahead-secs", "20")
-        setOptionSync("demuxer-max-bytes", "24MiB")
-        setOptionSync("demuxer-max-back-bytes", "8MiB")
+        // Keep a deeper network buffer on tvOS. Apple TV streams can have
+        // higher bitrate bursts and more variable throughput than iPhone,
+        // especially when served by a local Invidious instance.
+        setOptionSync("cache-secs", "60")
+        setOptionSync("demuxer-readahead-secs", "45")
+        setOptionSync("demuxer-max-bytes", "64MiB")
+        setOptionSync("demuxer-max-back-bytes", "16MiB")
         #else
         setOptionSync("demuxer-max-bytes", "50MiB")
         setOptionSync("demuxer-max-back-bytes", "25MiB")

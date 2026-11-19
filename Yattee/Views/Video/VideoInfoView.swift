@@ -79,6 +79,7 @@ struct VideoInfoView: View {
     @State private var isBookmarkExpanded = true
     @State private var isDownloadExpanded = false
     @State private var isOriginalTitleExpanded = true
+    @State private var isTranscriptExpanded = false
 
     // MARK: - Initializers
     
@@ -576,6 +577,16 @@ struct VideoInfoView: View {
 
                                 descriptionSection
                             }
+
+                            #if !os(tvOS)
+                            if let displayedVideo {
+                                Divider().padding(.horizontal)
+                                CollapsibleSection(title: String(localized: "Transcript"), isExpanded: $isTranscriptExpanded) {
+                                    TranscriptView(video: displayedVideo)
+                                        .id(displayedVideo.id)
+                                }
+                            }
+                            #endif
 
                             // Original title section - only show when DeArrow title is active
                             if shouldShowOriginalTitleSection {

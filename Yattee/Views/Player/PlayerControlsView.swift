@@ -773,6 +773,9 @@ struct PlayerControlsView: View {
     /// so the rest of the top edge is free. False without occlusion regions
     /// (a plain status bar keeps its safe area).
     private func isTopSafeAreaCornerOnly(in geometry: GeometryProxy, safeAreaTop: CGFloat) -> Bool {
+        // SwiftUI 8.1 adds reserved regions. Runtime availability alone cannot
+        // hide these symbols from older SDKs.
+        #if canImport(SwiftUI, _version: 8.1)
         guard #available(iOS 27.1, *), safeAreaTop > 0 else { return false }
 
         let width = geometry.size.width
@@ -782,6 +785,9 @@ struct PlayerControlsView: View {
         guard !topRegions.isEmpty else { return false }
         return topRegions.allSatisfy { $0.maxX < width / 2 }
             || topRegions.allSatisfy { $0.minX > width / 2 }
+        #else
+        return false
+        #endif
     }
 
     /// Extra leading/trailing padding that keeps a bar clear of occluding
@@ -795,6 +801,7 @@ struct PlayerControlsView: View {
         leadingPadding: CGFloat,
         trailingPadding: CGFloat
     ) -> (leading: CGFloat, trailing: CGFloat) {
+        #if canImport(SwiftUI, _version: 8.1)
         guard #available(iOS 27.1, *) else { return (0, 0) }
 
         let width = geometry.size.width
@@ -811,6 +818,9 @@ struct PlayerControlsView: View {
             }
         }
         return (leading, trailing)
+        #else
+        return (0, 0)
+        #endif
     }
 
     // MARK: - Top Bar

@@ -1319,10 +1319,14 @@ struct SubscriptionsView: View {
 
     /// Active occlusion regions seen by `geometry`, in global coordinates.
     private func occlusionFrames(in geometry: GeometryProxy) -> [CGRect] {
+        #if canImport(SwiftUI, _version: 8.1)
         guard #available(iOS 27.1, *) else { return [] }
         let origin = geometry.frame(in: .global).origin
         return geometry.reservedRegions(kind: .occlusion)
             .map { $0.frame.offsetBy(dx: origin.x, dy: origin.y) }
+        #else
+        return []
+        #endif
     }
 
     private var clampedIPadSidebarWidth: CGFloat {

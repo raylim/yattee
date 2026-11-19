@@ -106,6 +106,17 @@ final class MPVBackend: PlayerBackend {
     private var bufferStallStartTime: Date?
     private let bufferStallTimeout: TimeInterval = 30  // Trigger refresh after 30 seconds of stall
     private var bufferStallCheckTask: Task<Void, Never>?
+    private var unexpectedPauseRecoveryTask: Task<Void, Never>?
+    private var userPauseRequested = false
+
+    #if os(tvOS)
+    // A stream can stop advancing without MPV reporting paused-for-cache
+    // (for example after an HTTP connection stalls or an expiring URL fails).
+    // Track actual playback progress so tvOS can recover those stalls too.
+    private var lastPlaybackProgressTime = Date()
+    private var playbackStallRefreshRequested = false
+    private let playbackStallTimeout: TimeInterval = 15
+    #endif
 
     // Periodic playback stats logging so exported user logs can diagnose
     // stuttering / cache starvation remotely (GitHub #947/#949)
@@ -399,6 +410,8 @@ final class MPVBackend: PlayerBackend {
         // Stop buffer stall detection
         stopBufferStallDetection()
         stopPlaybackStatsLogging()
+        unexpectedPauseRecoveryTask?.cancel()
+        unexpectedPauseRecoveryTask = nil
 
         #if os(macOS)
         // Clear MPV client callbacks before destroying - these reference the render view
@@ -623,6 +636,9 @@ final class MPVBackend: PlayerBackend {
     }
 
     func play() {
+        userPauseRequested = false
+        unexpectedPauseRecoveryTask?.cancel()
+        unexpectedPauseRecoveryTask = nil
         guard isReady else {
             // Not ready yet - set pending flag to auto-play when ready
             LoggingService.shared.debug("MPV: play() called while not ready, setting pendingPlayAfterSeek", category: .mpv)
@@ -739,6 +755,9 @@ final class MPVBackend: PlayerBackend {
     }
 
     func pause() {
+        userPauseRequested = true
+        unexpectedPauseRecoveryTask?.cancel()
+        unexpectedPauseRecoveryTask = nil
         mpvClient?.pause()
         isPlaying = false
         delegate?.backend(self, didChangeState: .paused)
@@ -779,6 +798,9 @@ final class MPVBackend: PlayerBackend {
         // Stop buffer stall detection
         stopBufferStallDetection()
         stopPlaybackStatsLogging()
+        unexpectedPauseRecoveryTask?.cancel()
+        unexpectedPauseRecoveryTask = nil
+        userPauseRequested = false
 
         mpvClient?.stop()
         isPlaying = false
@@ -1632,6 +1654,12 @@ extension MPVBackend: MPVClientDelegate {
         switch property {
         case "time-pos":
             if let time = value as? Double, time >= 0 {
+                #if os(tvOS)
+                if time > currentTime + 0.05 {
+                    lastPlaybackProgressTime = Date()
+                    playbackStallRefreshRequested = false
+                }
+                #endif
                 currentTime = time
                 renderView?.updateTimePosition(time)
                 delegate?.backend(self, didUpdateTime: time)
@@ -1649,11 +1677,23 @@ extension MPVBackend: MPVClientDelegate {
 
         case "pause":
             if let paused = value as? Bool {
+                let wasPlaying = isPlaying
                 LoggingService.shared.debug("MPV: pause = \(paused), isReady = \(isReady), hasReachedEOF = \(hasReachedEOF)", category: .mpv)
                 isPlaying = !paused
                 #if !os(macOS) && !targetEnvironment(simulator)
                 renderView?.isPlaybackPaused = paused
                 #endif
+
+                // MPV can pause itself after an audio-route interruption or a
+                // transient decoder/connection hiccup even while its forward
+                // cache still contains data. Explicit user pauses are marked
+                // by pause() and are never overridden.
+                if paused, wasPlaying, isReady, !hasReachedEOF, !userPauseRequested {
+                    scheduleUnexpectedPauseRecovery()
+                } else if !paused {
+                    unexpectedPauseRecoveryTask?.cancel()
+                    unexpectedPauseRecoveryTask = nil
+                }
                 // Only send state changes after we're ready (have actual video)
                 // This prevents premature transition from loading to playing
                 // Don't override ended state when MPV pauses at EOF (keep-open=yes)
@@ -1929,6 +1969,10 @@ extension MPVBackend: MPVClientDelegate {
         case MPV_EVENT_FILE_LOADED:
             LoggingService.shared.debug("MPV: File loaded", category: .mpv)
             hwdecTrackingArmed = true
+            #if os(tvOS)
+            lastPlaybackProgressTime = Date()
+            playbackStallRefreshRequested = false
+            #endif
             startPlaybackStatsLogging()
             // Log hwdec diagnostics on tvOS (use cached values to avoid sync fetch)
             #if os(tvOS)
@@ -2039,6 +2083,25 @@ extension MPVBackend: MPVClientDelegate {
     }
 
     // MARK: - Buffer Stall Detection
+
+    private func scheduleUnexpectedPauseRecovery() {
+        unexpectedPauseRecoveryTask?.cancel()
+        unexpectedPauseRecoveryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled,
+                  !self.userPauseRequested,
+                  !self.isPlaying,
+                  self.isReady,
+                  !self.hasReachedEOF,
+                  !self.pausedForCache,
+                  self.demuxerCacheTime > 0.5 else { return }
+
+            LoggingService.shared.logMPV(
+                "MPV: Unexpected pause with \(String(format: "%.1f", self.demuxerCacheTime))s buffered, resuming playback"
+            )
+            self.play()
+        }
+    }
 
     /// Start monitoring for buffer stall (buffer stuck at 0% for too long).
     /// Called when paused-for-cache becomes true with 0% buffer during playback.
@@ -2169,6 +2232,20 @@ extension MPVBackend: MPVClientDelegate {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self, !Task.isCancelled, let client = self.mpvClient else { return }
+
+                #if os(tvOS)
+                // Recover stalls that leave MPV in a nominally-playing state
+                // without advancing time-pos or entering paused-for-cache.
+                if self.isPlaying, self.isReady, !self.isSeeking,
+                   !self.playbackStallRefreshRequested,
+                   Date().timeIntervalSince(self.lastPlaybackProgressTime) >= self.playbackStallTimeout {
+                    self.playbackStallRefreshRequested = true
+                    LoggingService.shared.logMPV(
+                        "MPV: tvOS playback stalled for \(Int(Date().timeIntervalSince(self.lastPlaybackProgressTime)))s, requesting stream refresh"
+                    )
+                    self.delegate?.backend(self, didRequestStreamRefresh: self.currentTime)
+                }
+                #endif
 
                 #if !os(macOS)
                 // Only macOS needs the property fetch every tick (render

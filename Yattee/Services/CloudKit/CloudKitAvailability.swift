@@ -6,6 +6,9 @@
 //
 
 import Foundation
+#if os(macOS)
+import Security
+#endif
 
 /// Sideloaded installs (AltStore, SideStore, Sideloadly, …) are re-signed by a
 /// team that cannot register `iCloud.stream.yattee.app` (container IDs are
@@ -15,15 +18,22 @@ import Foundation
 enum CloudKitAvailability {
     /// Whether CloudKit APIs may be used in this installation.
     ///
-    /// Determined by parsing the embedded provisioning profile. Builds without
-    /// an embedded profile (App Store, TestFlight, simulator) always carry the
-    /// correct entitlements and are treated as available.
+    /// macOS checks the running process entitlement, including unsigned builds.
+    /// Other platforms inspect the embedded provisioning profile when present.
     static let isAvailable: Bool = {
+        #if os(macOS)
+        guard let task = SecTaskCreateFromSelf(nil),
+              let containers = SecTaskCopyValueForEntitlement(
+                  task, "com.apple.developer.icloud-container-identifiers" as CFString, nil
+              ) as? [String] else { return false }
+        return containers.contains(AppIdentifiers.iCloudContainer)
+        #else
         guard let entitlements = embeddedProvisioningEntitlements() else {
             return true
         }
         let containers = entitlements["com.apple.developer.icloud-container-identifiers"] as? [String] ?? []
         return containers.contains(AppIdentifiers.iCloudContainer)
+        #endif
     }()
 
     /// Extracts the entitlements dictionary from the embedded provisioning

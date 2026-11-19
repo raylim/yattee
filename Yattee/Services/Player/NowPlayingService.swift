@@ -83,7 +83,8 @@ final class NowPlayingService {
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPNowPlayingInfoPropertyPlaybackQueueCount: 1,
             MPNowPlayingInfoPropertyPlaybackQueueIndex: 0,
-            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
+            MPNowPlayingInfoPropertyMediaType: playerService?.state.currentStream?.isAudioOnly == true
+                ? MPNowPlayingInfoMediaType.audio.rawValue : MPNowPlayingInfoMediaType.video.rawValue,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
         ]

@@ -369,3 +369,24 @@ struct PlaybackStateTests {
         #expect(PlaybackState.failed(error1) == PlaybackState.failed(error2))
     }
 }
+
+// MARK: - Live Stream Selection Tests
+
+@Suite("Live Stream Selection")
+@MainActor
+struct LiveStreamSelectionTests {
+    @Test("Live manifests without resolution take priority over standalone audio", arguments: ["hls", "dash"])
+    func liveManifestSelection(format: String) throws {
+        let client = HTTPClient()
+        let service = PlayerService(
+            httpClient: client,
+            contentService: ContentService(httpClient: client),
+            dataManager: try DataManager(inMemory: true)
+        )
+        let manifest = Stream(url: URL(string: "https://example.com/live")!, format: format, isLive: true)
+        let audio = Stream(url: URL(string: "https://example.com/audio")!, format: "m4a", audioCodec: "aac", isAudioOnly: true, isLive: true)
+        let selection = service.selectStreamsForPreload(from: [audio, manifest])
+        #expect(selection.stream == manifest)
+        #expect(selection.audioStream == nil)
+    }
+}

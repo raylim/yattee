@@ -1,0 +1,133 @@
+//  TranscriptView.swift
+//  Yattee
+//  Reads caption tracks and copies or exports their transcript.
+
+import Foundation
+import SwiftUI
+#if !os(tvOS)
+import UniformTypeIdentifiers
+
+struct TranscriptView: View {
+    let video: Video
+    @Environment(\.appEnvironment) private var appEnvironment
+    @State private var captions: [Caption] = []
+    @State private var selectedCaption: Caption?
+    @State private var transcript: Transcript?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var isExporting = false
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if !captions.isEmpty {
+                Picker("Language", selection: $selectedCaption) {
+                    ForEach(captions) { caption in
+                        Text(caption.label).tag(Optional(caption))
+                    }
+                }
+            }
+            if isLoading {
+                ProgressView("Loading transcript…")
+            } else if let errorMessage {
+                Text(errorMessage).foregroundStyle(.secondary)
+                Button("Retry") { Task { await load() } }
+            } else if let transcript {
+                HStack {
+                    Button(copied ? "Copied" : "Copy", systemImage: "doc.on.doc") {
+                        #if os(iOS)
+                        UIPasteboard.general.string = transcript.text
+                        #elseif os(macOS)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(transcript.text, forType: .string)
+                        #endif
+                        copied = true
+                    }
+                    Button("Save as Text", systemImage: "square.and.arrow.down") { isExporting = true }
+                }
+                ScrollView {
+                    Text(transcript.text)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 360)
+            } else {
+                Text("No captions are available for this video. A transcript requires a caption track.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task { await load() }
+        .task(id: selectedCaption) {
+            guard let selectedCaption else { return }
+            await loadTranscript(selectedCaption)
+        }
+        .fileExporter(isPresented: $isExporting, document: TranscriptDocument(text: transcript?.text ?? ""),
+                      contentType: .plainText, defaultFilename: "\(video.id.videoID)-transcript") { result in
+            if case .failure(let error) = result { errorMessage = error.localizedDescription }
+        }
+    }
+
+    private func load() async {
+        guard let appEnvironment else { return }
+        isLoading = true
+        errorMessage = nil
+        do {
+            if captions.isEmpty {
+                if appEnvironment.playerService.state.currentVideo?.id == video.id {
+                    captions = appEnvironment.playerService.availableCaptions
+                }
+                if captions.isEmpty {
+                    if case .extracted(_, let url) = video.id.source,
+                       let instance = appEnvironment.instancesManager.yatteeServerInstance {
+                        let (_, _, tracks) = try await appEnvironment.contentService.extractURL(url, instance: instance)
+                        captions = tracks
+                    } else if let instance = appEnvironment.instancesManager.instance(for: video) {
+                        let result = try await appEnvironment.contentService.videoWithProxyStreamsAndCaptionsAndStoryboards(
+                            id: video.id.videoID, instance: instance)
+                        captions = result.captions
+                    }
+                }
+            }
+            if let selectedCaption {
+                await loadTranscript(selectedCaption)
+            } else {
+                selectedCaption = captions.first
+                isLoading = selectedCaption != nil
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    private func loadTranscript(_ caption: Caption) async {
+        isLoading = true
+        transcript = nil
+        copied = false
+        errorMessage = nil
+        do {
+            let result = try await TranscriptService().load(caption)
+            try Task.checkCancellation()
+            transcript = result
+        } catch {
+            guard !Task.isCancelled else { return }
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+}
+
+private struct TranscriptDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [.plainText]
+    let text: String
+
+    init(text: String) { self.text = text }
+    init(configuration: ReadConfiguration) throws {
+        text = String(decoding: configuration.file.regularFileContents ?? Data(), as: UTF8.self)
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
+}
+#endif
