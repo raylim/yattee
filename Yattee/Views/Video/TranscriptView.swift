@@ -40,9 +40,17 @@ struct TranscriptView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 ScrollView {
-                    Text(transcript.text)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        ForEach(Array(transcript.text.components(separatedBy: "\n\n").enumerated()), id: \.offset) { _, paragraph in
+                            Text(verbatim: paragraph)
+                                .font(.body)
+                                .lineSpacing(5)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.trailing, 8)
                 }
                 .frame(height: 320)
             } else {
